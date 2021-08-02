@@ -2,6 +2,7 @@ use stable_deref_trait::StableDeref;
 use std::convert::TryInto;
 use std::mem;
 use std::ops::{Deref, Range};
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::Arc;
 use std::{fmt, io};
 
@@ -12,7 +13,7 @@ use std::{fmt, io};
 #[derive(Clone)]
 pub struct OwnedBytes {
     data: &'static [u8],
-    box_stable_deref: Arc<dyn Deref<Target = [u8]> + Sync + Send>,
+    box_stable_deref: Arc<dyn Deref<Target = [u8]> + Sync + Send + UnwindSafe + RefUnwindSafe>,
 }
 
 impl OwnedBytes {
@@ -22,7 +23,7 @@ impl OwnedBytes {
     }
 
     /// Creates an `OwnedBytes` intance given a `StableDeref` object.
-    pub fn new<T: StableDeref + Deref<Target = [u8]> + 'static + Send + Sync>(
+    pub fn new<T: StableDeref + Deref<Target = [u8]> + 'static + Send + Sync + RefUnwindSafe + UnwindSafe>(
         data_holder: T,
     ) -> OwnedBytes {
         let box_stable_deref = Arc::new(data_holder);
