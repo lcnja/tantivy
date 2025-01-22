@@ -2,29 +2,23 @@ mod block_wand;
 mod boolean_query;
 mod boolean_weight;
 
-pub(crate) use self::block_wand::block_wand;
-pub(crate) use self::block_wand::block_wand_single_scorer;
+pub(crate) use self::block_wand::{block_wand, block_wand_single_scorer};
 pub use self::boolean_query::BooleanQuery;
+pub use self::boolean_weight::BooleanWeight;
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use crate::assert_nearly_equals;
     use crate::collector::tests::TEST_COLLECTOR_WITH_SCORE;
     use crate::collector::TopDocs;
-    use crate::query::score_combiner::SumWithCoordsCombiner;
     use crate::query::term_query::TermScorer;
-    use crate::query::Intersection;
-    use crate::query::Occur;
-    use crate::query::Query;
-    use crate::query::QueryParser;
-    use crate::query::RequiredOptionalScorer;
-    use crate::query::Scorer;
-    use crate::query::TermQuery;
+    use crate::query::{
+        EnableScoring, Intersection, Occur, Query, QueryParser, RequiredOptionalScorer, Scorer,
+        SumCombiner, TermQuery,
+    };
     use crate::schema::*;
-    use crate::Index;
-    use crate::{DocAddress, DocId, Score};
+    use crate::{assert_nearly_equals, DocAddress, DocId, Index, IndexWriter, Score};
 
     fn aux_test_helper() -> crate::Result<(Index, Field)> {
         let mut schema_builder = Schema::builder();
@@ -33,7 +27,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             // writing the segment
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(text_field => "a b c"))?;
             index_writer.add_document(doc!(text_field => "a c"))?;
             index_writer.add_document(doc!(text_field => "b c"))?;
@@ -60,7 +54,7 @@ mod tests {
         let query_parser = QueryParser::for_index(&index, vec![text_field]);
         let query = query_parser.parse_query("+a")?;
         let searcher = index.reader()?.searcher();
-        let weight = query.weight(&searcher, true)?;
+        let weight = query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
         let scorer = weight.scorer(searcher.segment_reader(0u32), 1.0)?;
         assert!(scorer.is::<TermScorer>());
         Ok(())
@@ -73,13 +67,13 @@ mod tests {
         let searcher = index.reader()?.searcher();
         {
             let query = query_parser.parse_query("+a +b +c")?;
-            let weight = query.weight(&searcher, true)?;
+            let weight = query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
             let scorer = weight.scorer(searcher.segment_reader(0u32), 1.0)?;
             assert!(scorer.is::<Intersection<TermScorer>>());
         }
         {
             let query = query_parser.parse_query("+a +(b c)")?;
-            let weight = query.weight(&searcher, true)?;
+            let weight = query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
             let scorer = weight.scorer(searcher.segment_reader(0u32), 1.0)?;
             assert!(scorer.is::<Intersection<Box<dyn Scorer>>>());
         }
@@ -93,17 +87,14 @@ mod tests {
         let searcher = index.reader()?.searcher();
         {
             let query = query_parser.parse_query("+a b")?;
-            let weight = query.weight(&searcher, true)?;
+            let weight = query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
             let scorer = weight.scorer(searcher.segment_reader(0u32), 1.0)?;
-            assert!(scorer.is::<RequiredOptionalScorer<
-                Box<dyn Scorer>,
-                Box<dyn Scorer>,
-                SumWithCoordsCombiner,
-            >>());
+            assert!(scorer
+                .is::<RequiredOptionalScorer<Box<dyn Scorer>, Box<dyn Scorer>, SumCombiner>>());
         }
         {
             let query = query_parser.parse_query("+a b")?;
-            let weight = query.weight(&searcher, false)?;
+            let weight = query.weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
             let scorer = weight.scorer(searcher.segment_reader(0u32), 1.0)?;
             assert!(scorer.is::<TermScorer>());
         }
@@ -229,7 +220,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(text_field => "a b c"))?;
             index_writer.add_document(doc!(text_field => "a c"))?;
             index_writer.add_document(doc!(text_field => "b c"))?;
@@ -247,7 +238,9 @@ mod tests {
         let searcher = reader.searcher();
         let boolean_query =
             BooleanQuery::new(vec![(Occur::Should, term_a), (Occur::Should, term_b)]);
-        let boolean_weight = boolean_query.weight(&searcher, true).unwrap();
+        let boolean_weight = boolean_query
+            .weight(EnableScoring::enabled_from_searcher(&searcher))
+            .unwrap();
         {
             let mut boolean_scorer = boolean_weight.scorer(searcher.segment_reader(0u32), 1.0)?;
             assert_eq!(boolean_scorer.doc(), 0u32);
@@ -300,7 +293,7 @@ mod tests {
         let text = schema_builder.add_text_field("text", STRING);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 5_000_000)?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.add_document(doc!(text=>"a"))?;
         index_writer.add_document(doc!(text=>"b"))?;
         index_writer.commit()?;

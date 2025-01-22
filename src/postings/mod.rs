@@ -1,6 +1,4 @@
-/*!
-Postings module (also called inverted index)
-*/
+//! Postings module (also called inverted index)
 
 mod block_search;
 
@@ -8,27 +6,32 @@ pub(crate) use self::block_search::branchless_binary_search;
 
 mod block_segment_postings;
 pub(crate) mod compression;
+mod indexing_context;
+mod json_postings_writer;
+mod loaded_postings;
+mod per_field_postings_writer;
 mod postings;
 mod postings_writer;
 mod recorder;
 mod segment_postings;
 mod serializer;
 mod skip;
-mod stacker;
 mod term_info;
 
+pub(crate) use loaded_postings::LoadedPostings;
+pub(crate) use stacker::compute_table_memory_size;
+
 pub use self::block_segment_postings::BlockSegmentPostings;
+pub(crate) use self::indexing_context::IndexingContext;
+pub(crate) use self::per_field_postings_writer::PerFieldPostingsWriter;
 pub use self::postings::Postings;
-pub(crate) use self::postings_writer::MultiFieldPostingsWriter;
+pub(crate) use self::postings_writer::{serialize_postings, IndexingPosition, PostingsWriter};
 pub use self::segment_postings::SegmentPostings;
 pub use self::serializer::{FieldSerializer, InvertedIndexSerializer};
 pub(crate) use self::skip::{BlockInfo, SkipReader};
-pub(crate) use self::stacker::compute_table_size;
 pub use self::term_info::TermInfo;
 
-pub(crate) type UnorderedTermId = u64;
-
-#[cfg_attr(feature = "cargo-clippy", allow(clippy::enum_variant_names))]
+#[expect(clippy::enum_variant_names)]
 #[derive(Debug, PartialEq, Clone, Copy, Eq)]
 pub(crate) enum FreqReadingOption {
     NoFreq,
@@ -37,25 +40,21 @@ pub(crate) enum FreqReadingOption {
 }
 
 #[cfg(test)]
-pub mod tests {
-    use super::InvertedIndexSerializer;
-    use super::Postings;
-    use crate::core::Index;
-    use crate::core::SegmentComponent;
-    use crate::core::SegmentReader;
+pub(crate) mod tests {
+    use std::mem;
+
+    use super::{InvertedIndexSerializer, Postings};
     use crate::docset::{DocSet, TERMINATED};
     use crate::fieldnorm::FieldNormReader;
+    use crate::index::{Index, SegmentComponent, SegmentReader};
     use crate::indexer::operation::AddOperation;
     use crate::indexer::SegmentWriter;
     use crate::query::Scorer;
-    use crate::schema::{Field, TextOptions};
-    use crate::schema::{IndexRecordOption, TextFieldIndexing};
-    use crate::schema::{Schema, Term, INDEXED, TEXT};
+    use crate::schema::{
+        Field, IndexRecordOption, Schema, Term, TextFieldIndexing, TextOptions, INDEXED, TEXT,
+    };
     use crate::tokenizer::{SimpleTokenizer, MAX_TOKEN_LEN};
-    use crate::DocId;
-    use crate::HasLen;
-    use crate::Score;
-    use std::mem;
+    use crate::{DocId, HasLen, IndexWriter, Score};
 
     #[test]
     pub fn test_position_write() -> crate::Result<()> {
@@ -66,7 +65,7 @@ pub mod tests {
         let mut segment = index.new_segment();
         let mut posting_serializer = InvertedIndexSerializer::open(&mut segment)?;
         let mut field_serializer = posting_serializer.new_field(text_field, 120 * 4, None)?;
-        field_serializer.new_term("abc".as_bytes(), 12u32)?;
+        field_serializer.new_term("abc".as_bytes(), 12u32, true)?;
         for doc_id in 0u32..120u32 {
             let delta_positions = vec![1, 2, 3, 2];
             field_serializer.write_doc(doc_id, 4, &delta_positions);
@@ -165,7 +164,7 @@ pub mod tests {
         let index = Index::create_in_ram(schema);
         index
             .tokenizers()
-            .register("simple_no_truncation", SimpleTokenizer);
+            .register("simple_no_truncation", SimpleTokenizer::default());
         let reader = index.reader()?;
         let mut index_writer = index.writer_for_tests()?;
 
@@ -197,7 +196,7 @@ pub mod tests {
         let index = Index::create_in_ram(schema);
         index
             .tokenizers()
-            .register("simple_no_truncation", SimpleTokenizer);
+            .register("simple_no_truncation", SimpleTokenizer::default());
         let reader = index.reader()?;
         let mut index_writer = index.writer_for_tests()?;
 
@@ -223,12 +222,12 @@ pub mod tests {
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema.clone());
+        let index = Index::create_in_ram(schema);
         let segment = index.new_segment();
 
         {
             let mut segment_writer =
-                SegmentWriter::for_segment(3_000_000, segment.clone(), &schema).unwrap();
+                SegmentWriter::for_segment(15_000_000, segment.clone()).unwrap();
             {
                 // checking that position works if the field has two values
                 let op = AddOperation {
@@ -238,14 +237,14 @@ pub mod tests {
                        text_field => "d d d d a"
                     ),
                 };
-                segment_writer.add_document(op, &schema)?;
+                segment_writer.add_document(op)?;
             }
             {
                 let op = AddOperation {
                     opstamp: 1u64,
                     document: doc!(text_field => "b a"),
                 };
-                segment_writer.add_document(op, &schema).unwrap();
+                segment_writer.add_document(op).unwrap();
             }
             for i in 2..1000 {
                 let mut text: String = "e ".repeat(i);
@@ -254,7 +253,7 @@ pub mod tests {
                     opstamp: 2u64,
                     document: doc!(text_field => text),
                 };
-                segment_writer.add_document(op, &schema).unwrap();
+                segment_writer.add_document(op).unwrap();
             }
             segment_writer.finalize()?;
         }
@@ -435,7 +434,7 @@ pub mod tests {
 
         // delete some of the documents
         {
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.delete_term(term_0);
             assert!(index_writer.commit().is_ok());
         }
@@ -486,7 +485,7 @@ pub mod tests {
 
         // delete everything else
         {
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.delete_term(term_1);
             assert!(index_writer.commit().is_ok());
         }
@@ -501,7 +500,7 @@ pub mod tests {
         Ok(())
     }
 
-    /// Wraps a given docset, and forward alls call but the
+    /// Wraps a given docset, and forward all call but the
     /// `.skip_next(...)`. This is useful to test that a specialized
     /// implementation of `.skip_next(...)` is consistent
     /// with the default implementation.
@@ -547,8 +546,7 @@ pub mod tests {
             let skip_result_unopt = postings_unopt.seek(target);
             assert_eq!(
                 skip_result_unopt, skip_result_opt,
-                "Failed while skipping to {}",
-                target
+                "Failed while skipping to {target}"
             );
             assert!(skip_result_opt >= target);
             assert_eq!(skip_result_opt, postings_opt.doc());
@@ -565,17 +563,15 @@ pub mod tests {
 
 #[cfg(all(test, feature = "unstable"))]
 mod bench {
-    use crate::docset::TERMINATED;
-    use crate::query::Intersection;
-    use crate::schema::IndexRecordOption;
-    use crate::schema::{Document, Field, Schema, Term, STRING};
-    use crate::tests;
-    use crate::DocSet;
-    use crate::Index;
     use once_cell::sync::Lazy;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use test::{self, Bencher};
+
+    use crate::docset::TERMINATED;
+    use crate::query::Intersection;
+    use crate::schema::{Field, IndexRecordOption, Schema, TantivyDocument, Term, STRING};
+    use crate::{tests, DocSet, Index, IndexWriter};
 
     pub static TERM_A: Lazy<Term> = Lazy::new(|| {
         let field = Field::from_field_id(0);
@@ -604,9 +600,9 @@ mod bench {
         let index = Index::create_in_ram(schema);
         let posting_list_size = 1_000_000;
         {
-            let mut index_writer = index.writer_for_tests().unwrap();
+            let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
             for _ in 0..posting_list_size {
-                let mut doc = Document::default();
+                let mut doc = TantivyDocument::default();
                 if rng.gen_bool(1f64 / 15f64) {
                     doc.add_text(text_field, "a");
                 }
@@ -617,7 +613,7 @@ mod bench {
                     doc.add_text(text_field, "c");
                 }
                 doc.add_text(text_field, "d");
-                index_writer.add_document(doc);
+                index_writer.add_document(doc).unwrap();
             }
             assert!(index_writer.commit().is_ok());
         }
@@ -634,7 +630,7 @@ mod bench {
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
                 .unwrap()
-                .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .read_postings(&TERM_A, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             while segment_postings.advance() != TERMINATED {}
@@ -650,25 +646,25 @@ mod bench {
             let segment_postings_a = segment_reader
                 .inverted_index(TERM_A.field())
                 .unwrap()
-                .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .read_postings(&TERM_A, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             let segment_postings_b = segment_reader
                 .inverted_index(TERM_B.field())
                 .unwrap()
-                .read_postings(&*TERM_B, IndexRecordOption::Basic)
+                .read_postings(&TERM_B, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             let segment_postings_c = segment_reader
                 .inverted_index(TERM_C.field())
                 .unwrap()
-                .read_postings(&*TERM_C, IndexRecordOption::Basic)
+                .read_postings(&TERM_C, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             let segment_postings_d = segment_reader
                 .inverted_index(TERM_D.field())
                 .unwrap()
-                .read_postings(&*TERM_D, IndexRecordOption::Basic)
+                .read_postings(&TERM_D, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             let mut intersection = Intersection::new(vec![
@@ -690,7 +686,7 @@ mod bench {
         let mut segment_postings = segment_reader
             .inverted_index(TERM_A.field())
             .unwrap()
-            .read_postings(&*TERM_A, IndexRecordOption::Basic)
+            .read_postings(&TERM_A, IndexRecordOption::Basic)
             .unwrap()
             .unwrap();
 
@@ -708,7 +704,7 @@ mod bench {
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
                 .unwrap()
-                .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .read_postings(&TERM_A, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             for doc in &existing_docs {
@@ -749,7 +745,7 @@ mod bench {
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
                 .unwrap()
-                .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .read_postings(&TERM_A, IndexRecordOption::Basic)
                 .unwrap()
                 .unwrap();
             let mut s = 0u32;

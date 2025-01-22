@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
+use common::HasLen;
+
 use crate::docset::{DocSet, TERMINATED};
 use crate::DocId;
-use common::HasLen;
 
 /// Simulate a `Postings` objects from a `VecPostings`.
 /// `VecPostings` only exist for testing purposes.
@@ -49,11 +50,10 @@ impl HasLen for VecDocSet {
 }
 
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
 
     use super::*;
-    use crate::docset::DocSet;
-    use crate::DocId;
+    use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 
     #[test]
     pub fn test_vec_postings() {
@@ -71,17 +71,17 @@ pub mod tests {
 
     #[test]
     pub fn test_fill_buffer() {
-        let doc_ids: Vec<DocId> = (1u32..210u32).collect();
+        let doc_ids: Vec<DocId> = (1u32..=(COLLECT_BLOCK_BUFFER_LEN as u32 * 2 + 9)).collect();
         let mut postings = VecDocSet::from(doc_ids);
-        let mut buffer = vec![1000u32; 100];
-        assert_eq!(postings.fill_buffer(&mut buffer[..]), 100);
-        for i in 0u32..100u32 {
+        let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
+        assert_eq!(postings.fill_buffer(&mut buffer), COLLECT_BLOCK_BUFFER_LEN);
+        for i in 0u32..COLLECT_BLOCK_BUFFER_LEN as u32 {
             assert_eq!(buffer[i as usize], i + 1);
         }
-        assert_eq!(postings.fill_buffer(&mut buffer[..]), 100);
-        for i in 0u32..100u32 {
-            assert_eq!(buffer[i as usize], i + 101);
+        assert_eq!(postings.fill_buffer(&mut buffer), COLLECT_BLOCK_BUFFER_LEN);
+        for i in 0u32..COLLECT_BLOCK_BUFFER_LEN as u32 {
+            assert_eq!(buffer[i as usize], i + 1 + COLLECT_BLOCK_BUFFER_LEN as u32);
         }
-        assert_eq!(postings.fill_buffer(&mut buffer[..]), 9);
+        assert_eq!(postings.fill_buffer(&mut buffer), 9);
     }
 }

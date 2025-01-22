@@ -10,7 +10,8 @@
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
-use tantivy::{doc, Index, Snippet, SnippetGenerator};
+use tantivy::snippet::{Snippet, SnippetGenerator};
+use tantivy::{doc, Index, IndexWriter};
 use tempfile::TempDir;
 
 fn main() -> tantivy::Result<()> {
@@ -27,7 +28,7 @@ fn main() -> tantivy::Result<()> {
     // # Indexing documents
     let index = Index::create_in_dir(&index_path, schema)?;
 
-    let mut index_writer = index.writer(50_000_000)?;
+    let mut index_writer: IndexWriter = index.writer(50_000_000)?;
 
     // we'll only need one doc for this example.
     index_writer.add_document(doc!(
@@ -54,10 +55,10 @@ fn main() -> tantivy::Result<()> {
     let snippet_generator = SnippetGenerator::create(&searcher, &*query, body)?;
 
     for (score, doc_address) in top_docs {
-        let doc = searcher.doc(doc_address)?;
+        let doc = searcher.doc::<TantivyDocument>(doc_address)?;
         let snippet = snippet_generator.snippet_from_doc(&doc);
-        println!("Document score {}:", score);
-        println!("title: {}", doc.get_first(title).unwrap().text().unwrap());
+        println!("Document score {score}:");
+        println!("title: {}", doc.get_first(title).unwrap().as_str().unwrap());
         println!("snippet: {}", snippet.to_html());
         println!("custom highlighting: {}", highlight(snippet));
     }
@@ -70,13 +71,13 @@ fn highlight(snippet: Snippet) -> String {
     let mut start_from = 0;
 
     for fragment_range in snippet.highlighted() {
-        result.push_str(&snippet.fragments()[start_from..fragment_range.start]);
+        result.push_str(&snippet.fragment()[start_from..fragment_range.start]);
         result.push_str(" --> ");
-        result.push_str(&snippet.fragments()[fragment_range.clone()]);
+        result.push_str(&snippet.fragment()[fragment_range.clone()]);
         result.push_str(" <-- ");
         start_from = fragment_range.end;
     }
 
-    result.push_str(&snippet.fragments()[start_from..]);
+    result.push_str(&snippet.fragment()[start_from..]);
     result
 }

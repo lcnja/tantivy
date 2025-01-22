@@ -1,21 +1,23 @@
-//! Definition of Tantivy's error and result.
+//! Definition of Tantivy's errors and results.
 
-use std::io;
-
-use crate::directory::error::{Incompatibility, LockError};
-use crate::fastfield::FastFieldNotAvailableError;
-use crate::query;
-use crate::{
-    directory::error::{OpenDirectoryError, OpenReadError, OpenWriteError},
-    schema,
-};
-use std::fmt;
 use std::path::PathBuf;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
+use std::{fmt, io};
+
+use thiserror::Error;
+
+use crate::aggregation::AggregationError;
+use crate::directory::error::{
+    Incompatibility, LockError, OpenDirectoryError, OpenReadError, OpenWriteError,
+};
+use crate::fastfield::FastFieldNotAvailableError;
+use crate::schema::document::DeserializeError;
+use crate::{query, schema};
 
 /// Represents a `DataCorruption` error.
 ///
-/// When facing data corruption, tantivy  actually panic or return this error.
+/// When facing data corruption, tantivy actually panics or returns this error.
+#[derive(Clone)]
 pub struct DataCorruption {
     filepath: Option<PathBuf>,
     comment: String,
@@ -41,9 +43,9 @@ impl DataCorruption {
 
 impl fmt::Debug for DataCorruption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "Data corruption: ")?;
+        write!(f, "Data corruption")?;
         if let Some(ref filepath) = &self.filepath {
-            write!(f, "(in file `{:?}`)", filepath)?;
+            write!(f, " (in file `{filepath:?}`)")?;
         }
         write!(f, ": {}.", self.comment)?;
         Ok(())
@@ -51,8 +53,11 @@ impl fmt::Debug for DataCorruption {
 }
 
 /// The library's error enum
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum TantivyError {
+    /// Error when handling aggregations.
+    #[error(transparent)]
+    AggregationError(#[from] AggregationError),
     /// Failed to open the directory.
     #[error("Failed to open the directory: '{0:?}'")]
     OpenDirectoryError(#[from] OpenDirectoryError),
@@ -62,41 +67,56 @@ pub enum TantivyError {
     /// Failed to open a file for write.
     #[error("Failed to open file for write: '{0:?}'")]
     OpenWriteError(#[from] OpenWriteError),
-    /// Index already exists in this directory
+    /// Index already exists in this directory.
     #[error("Index already exists")]
     IndexAlreadyExists,
-    /// Failed to acquire file lock
+    /// Failed to acquire file lock.
     #[error("Failed to acquire Lockfile: {0:?}. {1:?}")]
     LockFailure(LockError, Option<String>),
     /// IO Error.
     #[error("An IO error occurred: '{0}'")]
-    IoError(#[from] io::Error),
+    IoError(Arc<io::Error>),
     /// Data corruption.
     #[error("Data corrupted: '{0:?}'")]
     DataCorruption(DataCorruption),
     /// A thread holding the locked panicked and poisoned the lock.
     #[error("A thread holding the locked panicked and poisoned the lock")]
     Poisoned,
+    /// The provided field name does not exist.
+    #[error("The field does not exist: '{0}'")]
+    FieldNotFound(String),
     /// Invalid argument was passed by the user.
     #[error("An invalid argument was passed: '{0}'")]
     InvalidArgument(String),
-    /// An Error happened in one of the thread.
+    /// An Error occurred in one of the threads.
     #[error("An error occurred in a thread: '{0}'")]
     ErrorInThread(String),
-    /// An Error appeared related to opening or creating a index.
+    /// An Error occurred related to opening or creating a index.
     #[error("Missing required index builder argument when open/create index: '{0}'")]
     IndexBuilderMissingArgument(&'static str),
-    /// An Error appeared related to the schema.
+    /// An Error occurred related to the schema.
     #[error("Schema error: '{0}'")]
     SchemaError(String),
-    /// System error. (e.g.: We failed spawning a new thread)
+    /// System error. (e.g.: We failed spawning a new thread).
     #[error("System error.'{0}'")]
     SystemError(String),
-    /// Index incompatible with current version of tantivy
+    /// Index incompatible with current version of Tantivy.
     #[error("{0:?}")]
     IncompatibleIndex(Incompatibility),
+    /// An internal error occurred. This is are internal states that should not be reached.
+    /// e.g. a datastructure is incorrectly inititalized.
+    #[error("Internal error: '{0}'")]
+    InternalError(String),
+    #[error("Deserialize error: {0}")]
+    /// An error occurred while attempting to deserialize a document.
+    DeserializeError(DeserializeError),
 }
 
+impl From<io::Error> for TantivyError {
+    fn from(io_err: io::Error) -> TantivyError {
+        TantivyError::IoError(Arc::new(io_err))
+    }
+}
 impl From<DataCorruption> for TantivyError {
     fn from(data_corruption: DataCorruption) -> TantivyError {
         TantivyError::DataCorruption(data_corruption)
@@ -104,7 +124,7 @@ impl From<DataCorruption> for TantivyError {
 }
 impl From<FastFieldNotAvailableError> for TantivyError {
     fn from(fastfield_error: FastFieldNotAvailableError) -> TantivyError {
-        TantivyError::SchemaError(format!("{}", fastfield_error))
+        TantivyError::SchemaError(format!("{fastfield_error}"))
     }
 }
 impl From<LockError> for TantivyError {
@@ -115,7 +135,7 @@ impl From<LockError> for TantivyError {
 
 impl From<query::QueryParserError> for TantivyError {
     fn from(parsing_error: query::QueryParserError) -> TantivyError {
-        TantivyError::InvalidArgument(format!("Query is invalid. {:?}", parsing_error))
+        TantivyError::InvalidArgument(format!("Query is invalid. {parsing_error:?}"))
     }
 }
 
@@ -125,26 +145,44 @@ impl<Guard> From<PoisonError<Guard>> for TantivyError {
     }
 }
 
-impl From<chrono::ParseError> for TantivyError {
-    fn from(err: chrono::ParseError) -> TantivyError {
-        TantivyError::InvalidArgument(err.to_string())
+impl From<time::error::Format> for TantivyError {
+    fn from(err: time::error::Format) -> TantivyError {
+        TantivyError::InvalidArgument(format!("Date formatting error: {err}"))
+    }
+}
+
+impl From<time::error::Parse> for TantivyError {
+    fn from(err: time::error::Parse) -> TantivyError {
+        TantivyError::InvalidArgument(format!("Date parsing error: {err}"))
+    }
+}
+
+impl From<time::error::ComponentRange> for TantivyError {
+    fn from(err: time::error::ComponentRange) -> TantivyError {
+        TantivyError::InvalidArgument(format!("Date range error: {err}"))
     }
 }
 
 impl From<schema::DocParsingError> for TantivyError {
     fn from(error: schema::DocParsingError) -> TantivyError {
-        TantivyError::InvalidArgument(format!("Failed to parse document {:?}", error))
+        TantivyError::InvalidArgument(format!("Failed to parse document {error:?}"))
     }
 }
 
 impl From<serde_json::Error> for TantivyError {
     fn from(error: serde_json::Error) -> TantivyError {
-        TantivyError::IoError(error.into())
+        TantivyError::IoError(Arc::new(error.into()))
     }
 }
 
 impl From<rayon::ThreadPoolBuildError> for TantivyError {
     fn from(error: rayon::ThreadPoolBuildError) -> TantivyError {
         TantivyError::SystemError(error.to_string())
+    }
+}
+
+impl From<DeserializeError> for TantivyError {
+    fn from(error: DeserializeError) -> TantivyError {
+        TantivyError::DeserializeError(error)
     }
 }

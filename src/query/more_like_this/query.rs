@@ -1,10 +1,9 @@
-use super::MoreLikeThis;
+use std::fmt::Debug;
 
-use crate::{
-    query::{Query, Weight},
-    schema::{Field, FieldValue},
-    DocAddress, Result, Searcher,
-};
+use super::MoreLikeThis;
+use crate::query::{EnableScoring, Query, Weight};
+use crate::schema::{Field, OwnedValue};
+use crate::DocAddress;
 
 /// A query that matches all of the documents similar to a document
 /// or a set of field values provided.
@@ -24,7 +23,6 @@ use crate::{
 ///     .with_boost_factor(1.0)
 ///     .with_stop_words(vec!["for".to_string()])
 ///     .with_document(DocAddress::new(2, 1));
-///
 /// ```
 #[derive(Debug, Clone)]
 pub struct MoreLikeThisQuery {
@@ -32,10 +30,10 @@ pub struct MoreLikeThisQuery {
     target: TargetDocument,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum TargetDocument {
-    DocumentAdress(DocAddress),
-    DocumentFields(Vec<(Field, Vec<FieldValue>)>),
+    DocumentAddress(DocAddress),
+    DocumentFields(Vec<(Field, Vec<OwnedValue>)>),
 }
 
 impl MoreLikeThisQuery {
@@ -46,16 +44,29 @@ impl MoreLikeThisQuery {
 }
 
 impl Query for MoreLikeThisQuery {
-    fn weight(&self, searcher: &Searcher, scoring_enabled: bool) -> Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let searcher = match enable_scoring {
+            EnableScoring::Enabled { searcher, .. } => searcher,
+            EnableScoring::Disabled { .. } => {
+                let err = "MoreLikeThisQuery requires to enable scoring.".to_string();
+                return Err(crate::TantivyError::InvalidArgument(err));
+            }
+        };
         match &self.target {
-            TargetDocument::DocumentAdress(doc_address) => self
+            TargetDocument::DocumentAddress(doc_address) => self
                 .mlt
                 .query_with_document(searcher, *doc_address)?
-                .weight(searcher, scoring_enabled),
-            TargetDocument::DocumentFields(doc_fields) => self
-                .mlt
-                .query_with_document_fields(searcher, doc_fields)?
-                .weight(searcher, scoring_enabled),
+                .weight(enable_scoring),
+            TargetDocument::DocumentFields(doc_fields) => {
+                let values = doc_fields
+                    .iter()
+                    .map(|(field, values)| (*field, values.iter().collect::<Vec<&OwnedValue>>()))
+                    .collect::<Vec<_>>();
+
+                self.mlt
+                    .query_with_document_fields(searcher, &values)?
+                    .weight(enable_scoring)
+            }
         }
     }
 }
@@ -71,6 +82,7 @@ impl MoreLikeThisQueryBuilder {
     ///
     /// The resulting query will ignore words which do not occur
     /// in at least this many docs.
+    #[must_use]
     pub fn with_min_doc_frequency(mut self, value: u64) -> Self {
         self.mlt.min_doc_frequency = Some(value);
         self
@@ -80,6 +92,7 @@ impl MoreLikeThisQueryBuilder {
     ///
     /// The resulting query will ignore words which occur
     /// in more than this many docs.
+    #[must_use]
     pub fn with_max_doc_frequency(mut self, value: u64) -> Self {
         self.mlt.max_doc_frequency = Some(value);
         self
@@ -89,6 +102,7 @@ impl MoreLikeThisQueryBuilder {
     ///
     /// The resulting query will ignore words less
     /// frequent that this number.
+    #[must_use]
     pub fn with_min_term_frequency(mut self, value: usize) -> Self {
         self.mlt.min_term_frequency = Some(value);
         self
@@ -97,6 +111,7 @@ impl MoreLikeThisQueryBuilder {
     /// Sets the maximum query terms.
     ///
     /// The resulting query will not return a query with more clause than this.
+    #[must_use]
     pub fn with_max_query_terms(mut self, value: usize) -> Self {
         self.mlt.max_query_terms = Some(value);
         self
@@ -105,6 +120,7 @@ impl MoreLikeThisQueryBuilder {
     /// Sets the minimum word length.
     ///
     /// The resulting query will ignore words shorter than this length.
+    #[must_use]
     pub fn with_min_word_length(mut self, value: usize) -> Self {
         self.mlt.min_word_length = Some(value);
         self
@@ -113,6 +129,7 @@ impl MoreLikeThisQueryBuilder {
     /// Sets the maximum word length.
     ///
     /// The resulting query will ignore words longer than this length.
+    #[must_use]
     pub fn with_max_word_length(mut self, value: usize) -> Self {
         self.mlt.max_word_length = Some(value);
         self
@@ -121,6 +138,7 @@ impl MoreLikeThisQueryBuilder {
     /// Sets the boost factor
     ///
     /// The boost factor used by the resulting query for boosting terms.
+    #[must_use]
     pub fn with_boost_factor(mut self, value: f32) -> Self {
         self.mlt.boost_factor = Some(value);
         self
@@ -129,6 +147,7 @@ impl MoreLikeThisQueryBuilder {
     /// Sets the set of stop words
     ///
     /// The resulting query will ignore these set of words.
+    #[must_use]
     pub fn with_stop_words(mut self, value: Vec<String>) -> Self {
         self.mlt.stop_words = value;
         self
@@ -145,7 +164,7 @@ impl MoreLikeThisQueryBuilder {
     pub fn with_document(self, doc_address: DocAddress) -> MoreLikeThisQuery {
         MoreLikeThisQuery {
             mlt: self.mlt,
-            target: TargetDocument::DocumentAdress(doc_address),
+            target: TargetDocument::DocumentAddress(doc_address),
         }
     }
 
@@ -158,7 +177,7 @@ impl MoreLikeThisQueryBuilder {
     /// not necessarily from a specific document.
     pub fn with_document_fields(
         self,
-        doc_fields: Vec<(Field, Vec<FieldValue>)>,
+        doc_fields: Vec<(Field, Vec<OwnedValue>)>,
     ) -> MoreLikeThisQuery {
         MoreLikeThisQuery {
             mlt: self.mlt,
@@ -169,12 +188,10 @@ impl MoreLikeThisQueryBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::MoreLikeThisQuery;
-    use super::TargetDocument;
+    use super::{MoreLikeThisQuery, TargetDocument};
     use crate::collector::TopDocs;
     use crate::schema::{Schema, STORED, TEXT};
-    use crate::DocAddress;
-    use crate::Index;
+    use crate::{DocAddress, Index, IndexWriter};
 
     fn create_test_index() -> crate::Result<Index> {
         let mut schema_builder = Schema::builder();
@@ -182,7 +199,7 @@ mod tests {
         let body = schema_builder.add_text_field("body", TEXT | STORED);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests().unwrap();
+        let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(title => "aaa", body => "the old man and the sea"))?;
         index_writer.add_document(doc!(title => "bbb", body => "an old man sailing on the sea"))?;
         index_writer.add_document(doc!(title => "ccc", body=> "send this message to alice"))?;
@@ -230,7 +247,7 @@ mod tests {
         );
         assert_eq!(
             query.target,
-            TargetDocument::DocumentAdress(DocAddress::new(1, 2))
+            TargetDocument::DocumentAddress(DocAddress::new(1, 2))
         );
     }
 

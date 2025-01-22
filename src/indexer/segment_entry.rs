@@ -1,20 +1,18 @@
-use crate::core::SegmentId;
-use crate::core::SegmentMeta;
-use crate::indexer::delete_queue::DeleteCursor;
-use common::BitSet;
 use std::fmt;
+
+use common::BitSet;
+
+use crate::index::{SegmentId, SegmentMeta};
+use crate::indexer::delete_queue::DeleteCursor;
 
 /// A segment entry describes the state of
 /// a given segment, at a given instant.
 ///
 /// In addition to segment `meta`,
 /// it contains a few transient states
-/// - `alive_bitset` is a bitset describing
-/// documents that were alive during the commit
-/// itself.
-/// - `delete_cursor` is the position in the delete queue.
-/// Deletes happening before the cursor are reflected either
-/// in the .del file or in the `alive_bitset`.
+/// - `alive_bitset` is a bitset describing documents that were alive during the commit itself.
+/// - `delete_cursor` is the position in the delete queue. Deletes happening before the cursor are
+///   reflected either in the .del file or in the `alive_bitset`.
 #[derive(Clone)]
 pub struct SegmentEntry {
     meta: SegmentMeta,

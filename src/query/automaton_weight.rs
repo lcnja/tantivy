@@ -1,20 +1,25 @@
-use crate::core::SegmentReader;
-use crate::query::ConstScorer;
-use crate::query::{BitSetDocSet, Explanation};
-use crate::query::{Scorer, Weight};
-use crate::schema::{Field, IndexRecordOption};
-use crate::termdict::{TermDictionary, TermStreamer};
-use crate::TantivyError;
-use crate::{DocId, Score};
-use common::BitSet;
 use std::io;
 use std::sync::Arc;
+
+use common::BitSet;
 use tantivy_fst::Automaton;
+
+use super::phrase_prefix_query::prefix_end;
+use crate::index::SegmentReader;
+use crate::postings::TermInfo;
+use crate::query::{BitSetDocSet, ConstScorer, Explanation, Scorer, Weight};
+use crate::schema::{Field, IndexRecordOption};
+use crate::termdict::{TermDictionary, TermStreamer};
+use crate::{DocId, Score, TantivyError};
 
 /// A weight struct for Fuzzy Term and Regex Queries
 pub struct AutomatonWeight<A> {
     field: Field,
     automaton: Arc<A>,
+    // For JSON fields, the term dictionary include terms from all paths.
+    // We apply additional filtering based on the given JSON path, when searching within the term
+    // dictionary. This prevents terms from unrelated paths from matching the search criteria.
+    json_path_bytes: Option<Box<[u8]>>,
 }
 
 impl<A> AutomatonWeight<A>
@@ -27,6 +32,20 @@ where
         AutomatonWeight {
             field,
             automaton: automaton.into(),
+            json_path_bytes: None,
+        }
+    }
+
+    /// Create a new AutomationWeight for a json path
+    pub fn new_for_json_path<IntoArcA: Into<Arc<A>>>(
+        field: Field,
+        automaton: IntoArcA,
+        json_path_bytes: &[u8],
+    ) -> AutomatonWeight<A> {
+        AutomatonWeight {
+            field,
+            automaton: automaton.into(),
+            json_path_bytes: Some(json_path_bytes.to_vec().into_boxed_slice()),
         }
     }
 
@@ -34,9 +53,29 @@ where
         &'a self,
         term_dict: &'a TermDictionary,
     ) -> io::Result<TermStreamer<'a, &'a A>> {
-        let automaton: &A = &*self.automaton;
-        let term_stream_builder = term_dict.search(automaton);
+        let automaton: &A = &self.automaton;
+        let mut term_stream_builder = term_dict.search(automaton);
+
+        if let Some(json_path_bytes) = &self.json_path_bytes {
+            term_stream_builder = term_stream_builder.ge(json_path_bytes);
+            if let Some(end) = prefix_end(json_path_bytes) {
+                term_stream_builder = term_stream_builder.lt(&end);
+            }
+        }
+
         term_stream_builder.into_stream()
+    }
+
+    /// Returns the term infos that match the automaton
+    pub fn get_match_term_infos(&self, reader: &SegmentReader) -> crate::Result<Vec<TermInfo>> {
+        let inverted_index = reader.inverted_index(self.field)?;
+        let term_dict = inverted_index.terms();
+        let mut term_stream = self.automaton_stream(term_dict)?;
+        let mut term_infos = Vec::new();
+        while term_stream.advance() {
+            term_infos.push(term_stream.value().clone());
+        }
+        Ok(term_infos)
     }
 }
 
@@ -85,18 +124,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tantivy_fst::Automaton;
+
     use super::AutomatonWeight;
     use crate::docset::TERMINATED;
     use crate::query::Weight;
     use crate::schema::{Schema, STRING};
-    use crate::Index;
-    use tantivy_fst::Automaton;
+    use crate::{Index, IndexWriter};
 
     fn create_index() -> crate::Result<Index> {
         let mut schema = Schema::builder();
         let title = schema.add_text_field("title", STRING);
         let index = Index::create_in_ram(schema.build());
-        let mut index_writer = index.writer_for_tests()?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.add_document(doc!(title=>"abc"))?;
         index_writer.add_document(doc!(title=>"bcd"))?;
         index_writer.add_document(doc!(title=>"abcd"))?;

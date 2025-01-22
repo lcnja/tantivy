@@ -1,10 +1,11 @@
-use crate::error::TantivyError;
-use crate::query::{AutomatonWeight, Query, Weight};
-use crate::schema::Field;
-use crate::Searcher;
 use std::clone::Clone;
 use std::sync::Arc;
+
 use tantivy_fst::Regex;
+
+use crate::error::TantivyError;
+use crate::query::{AutomatonWeight, EnableScoring, Query, Weight};
+use crate::schema::Field;
 
 /// A Regex Query matches all of the documents
 /// containing a specific term that matches
@@ -17,7 +18,7 @@ use tantivy_fst::Regex;
 /// use tantivy::collector::Count;
 /// use tantivy::query::RegexQuery;
 /// use tantivy::schema::{Schema, TEXT};
-/// use tantivy::{doc, Index, Term};
+/// use tantivy::{doc, Index, IndexWriter, Term};
 ///
 /// # fn test() -> tantivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
@@ -25,7 +26,7 @@ use tantivy_fst::Regex;
 /// let schema = schema_builder.build();
 /// let index = Index::create_in_ram(schema);
 /// {
-///     let mut index_writer = index.writer(3_000_000)?;
+///     let mut index_writer: IndexWriter = index.writer(15_000_000)?;
 ///     index_writer.add_document(doc!(
 ///         title => "The Name of the Wind",
 ///     ))?;
@@ -62,7 +63,7 @@ impl RegexQuery {
     /// Creates a new RegexQuery from a given pattern
     pub fn from_pattern(regex_pattern: &str, field: Field) -> crate::Result<Self> {
         let regex = Regex::new(regex_pattern)
-            .map_err(|_| TantivyError::InvalidArgument(regex_pattern.to_string()))?;
+            .map_err(|err| TantivyError::InvalidArgument(format!("RegexQueryError: {err}")))?;
         Ok(RegexQuery::from_regex(regex, field))
     }
 
@@ -80,25 +81,21 @@ impl RegexQuery {
 }
 
 impl Query for RegexQuery {
-    fn weight(
-        &self,
-        _searcher: &Searcher,
-        _scoring_enabled: bool,
-    ) -> crate::Result<Box<dyn Weight>> {
+    fn weight(&self, _enabled_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight()))
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::RegexQuery;
-    use crate::assert_nearly_equals;
-    use crate::collector::TopDocs;
-    use crate::schema::TEXT;
-    use crate::schema::{Field, Schema};
-    use crate::{Index, IndexReader};
     use std::sync::Arc;
+
     use tantivy_fst::Regex;
+
+    use super::RegexQuery;
+    use crate::collector::TopDocs;
+    use crate::schema::{Field, Schema, TEXT};
+    use crate::{assert_nearly_equals, Index, IndexReader, IndexWriter};
 
     fn build_test_index() -> crate::Result<(IndexReader, Field)> {
         let mut schema_builder = Schema::builder();
@@ -106,7 +103,7 @@ mod test {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_for_tests().unwrap();
+            let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
             index_writer.add_document(doc!(
                 country_field => "japan",
             ))?;
@@ -178,5 +175,17 @@ mod test {
 
         verify_regex_query(matching_one, matching_zero, reader);
         Ok(())
+    }
+
+    #[test]
+    pub fn test_pattern_error() {
+        let (_reader, field) = build_test_index().unwrap();
+
+        match RegexQuery::from_pattern(r"(foo", field) {
+            Err(crate::TantivyError::InvalidArgument(msg)) => {
+                assert!(msg.contains("error: unclosed group"))
+            }
+            res => panic!("unexpected result: {res:?}"),
+        }
     }
 }

@@ -1,8 +1,9 @@
+use common::{BinarySerializable, VInt};
+
 use crate::directory::OwnedBytes;
 use crate::store::index::block::CheckpointBlock;
 use crate::store::index::Checkpoint;
 use crate::DocId;
-use common::{BinarySerializable, VInt};
 
 pub struct LayerCursor<'a> {
     remaining: &'a [u8],
@@ -10,7 +11,7 @@ pub struct LayerCursor<'a> {
     cursor: usize,
 }
 
-impl<'a> Iterator for LayerCursor<'a> {
+impl Iterator for LayerCursor<'_> {
     type Item = Checkpoint;
 
     fn next(&mut self) -> Option<Checkpoint> {

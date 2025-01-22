@@ -21,7 +21,6 @@ pub trait ScoreCombiner: Default + Clone + Send + Copy + 'static {
 /// even call the scorers `.score()` function.
 ///
 /// It is useful to optimize the case when scoring is disabled.
-///
 #[derive(Default, Clone, Copy)] //< these should not be too much work :)
 pub struct DoNothingCombiner;
 
@@ -55,26 +54,39 @@ impl ScoreCombiner for SumCombiner {
     }
 }
 
-/// Sums the score of different scorers and keeps the count
-/// of scorers which matched.
+/// Take max score of different scorers
+/// and optionally sum it with other matches multiplied by `tie_breaker`
 #[derive(Default, Clone, Copy)]
-pub struct SumWithCoordsCombiner {
-    num_fields: usize,
-    score: Score,
+pub struct DisjunctionMaxCombiner {
+    max: Score,
+    sum: Score,
+    tie_breaker: Score,
 }
 
-impl ScoreCombiner for SumWithCoordsCombiner {
+impl DisjunctionMaxCombiner {
+    /// Creates `DisjunctionMaxCombiner` with tie breaker
+    pub fn with_tie_breaker(tie_breaker: Score) -> DisjunctionMaxCombiner {
+        DisjunctionMaxCombiner {
+            max: 0.0,
+            sum: 0.0,
+            tie_breaker,
+        }
+    }
+}
+
+impl ScoreCombiner for DisjunctionMaxCombiner {
     fn update<TScorer: Scorer>(&mut self, scorer: &mut TScorer) {
-        self.score += scorer.score();
-        self.num_fields += 1;
+        let score = scorer.score();
+        self.max = Score::max(score, self.max);
+        self.sum += score;
     }
 
     fn clear(&mut self) {
-        self.score = 0.0;
-        self.num_fields = 0;
+        self.max = 0.0;
+        self.sum = 0.0;
     }
 
     fn score(&self) -> Score {
-        self.score
+        self.max + (self.sum - self.max) * self.tie_breaker
     }
 }

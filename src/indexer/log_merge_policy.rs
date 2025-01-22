@@ -1,13 +1,18 @@
-use super::merge_policy::{MergeCandidate, MergePolicy};
-use crate::core::SegmentMeta;
-use itertools::Itertools;
 use std::cmp;
-use std::f64;
+
+use itertools::Itertools;
+
+use super::merge_policy::{MergeCandidate, MergePolicy};
+use crate::index::SegmentMeta;
 
 const DEFAULT_LEVEL_LOG_SIZE: f64 = 0.75;
 const DEFAULT_MIN_LAYER_SIZE: u32 = 10_000;
 const DEFAULT_MIN_NUM_SEGMENTS_IN_MERGE: usize = 8;
 const DEFAULT_MAX_DOCS_BEFORE_MERGE: usize = 10_000_000;
+// The default value of 1 means that deletes are not taken in account when
+// identifying merge candidates. This is not a very sensible default: it was
+// set like that for backward compatibility and might change in the near future.
+const DEFAULT_DEL_DOCS_RATIO_BEFORE_MERGE: f32 = 1.0f32;
 
 /// `LogMergePolicy` tries to merge segments that have a similar number of
 /// documents.
@@ -17,6 +22,7 @@ pub struct LogMergePolicy {
     max_docs_before_merge: usize,
     min_layer_size: u32,
     level_log_size: f64,
+    del_docs_ratio_before_merge: f32,
 }
 
 impl LogMergePolicy {
@@ -52,23 +58,53 @@ impl LogMergePolicy {
     pub fn set_level_log_size(&mut self, level_log_size: f64) {
         self.level_log_size = level_log_size;
     }
+
+    /// Set the ratio of deleted documents in a segment to tolerate.
+    ///
+    /// If it is exceeded by any segment at a log level, a merge
+    /// will be triggered for that level.
+    ///
+    /// If there is a single segment at a level, we effectively end up expunging
+    /// deleted documents from it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if del_docs_ratio_before_merge is not within (0..1].
+    pub fn set_del_docs_ratio_before_merge(&mut self, del_docs_ratio_before_merge: f32) {
+        assert!(del_docs_ratio_before_merge <= 1.0f32);
+        assert!(del_docs_ratio_before_merge > 0f32);
+        self.del_docs_ratio_before_merge = del_docs_ratio_before_merge;
+    }
+
+    fn has_segment_above_deletes_threshold(&self, level: &[&SegmentMeta]) -> bool {
+        level
+            .iter()
+            .any(|segment| deletes_ratio(segment) > self.del_docs_ratio_before_merge)
+    }
+}
+
+fn deletes_ratio(segment: &SegmentMeta) -> f32 {
+    if segment.max_doc() == 0 {
+        return 0f32;
+    }
+    segment.num_deleted_docs() as f32 / segment.max_doc() as f32
 }
 
 impl MergePolicy for LogMergePolicy {
     fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
-        let mut size_sorted_segments = segments
+        let size_sorted_segments = segments
             .iter()
-            .filter(|segment_meta| segment_meta.num_docs() <= (self.max_docs_before_merge as u32))
+            .filter(|seg| seg.num_docs() <= (self.max_docs_before_merge as u32))
+            .sorted_by_key(|seg| std::cmp::Reverse(seg.max_doc()))
             .collect::<Vec<&SegmentMeta>>();
 
-        if size_sorted_segments.len() <= 1 {
+        if size_sorted_segments.is_empty() {
             return vec![];
         }
-        size_sorted_segments.sort_by_key(|seg| std::cmp::Reverse(seg.num_docs()));
 
         let mut current_max_log_size = f64::MAX;
         let mut levels = vec![];
-        for (_, merge_group) in &size_sorted_segments.into_iter().group_by(|segment| {
+        for (_, merge_group) in &size_sorted_segments.into_iter().chunk_by(|segment| {
             let segment_log_size = f64::from(self.clip_min_size(segment.num_docs())).log2();
             if segment_log_size < (current_max_log_size - self.level_log_size) {
                 // update current_max_log_size to create a new group
@@ -82,7 +118,10 @@ impl MergePolicy for LogMergePolicy {
 
         levels
             .iter()
-            .filter(|level| level.len() >= self.min_num_segments)
+            .filter(|level| {
+                level.len() >= self.min_num_segments
+                    || self.has_segment_above_deletes_threshold(level)
+            })
             .map(|segments| MergeCandidate(segments.iter().map(|&seg| seg.id()).collect()))
             .collect()
     }
@@ -95,19 +134,19 @@ impl Default for LogMergePolicy {
             max_docs_before_merge: DEFAULT_MAX_DOCS_BEFORE_MERGE,
             min_layer_size: DEFAULT_MIN_LAYER_SIZE,
             level_log_size: DEFAULT_LEVEL_LOG_SIZE,
+            del_docs_ratio_before_merge: DEFAULT_DEL_DOCS_RATIO_BEFORE_MERGE,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        core::{SegmentId, SegmentMeta, SegmentMetaInventory},
-        schema,
-    };
-    use crate::{indexer::merge_policy::MergePolicy, schema::INDEXED};
     use once_cell::sync::Lazy;
+
+    use super::*;
+    use crate::index::{SegmentId, SegmentMetaInventory};
+    use crate::schema;
+    use crate::schema::INDEXED;
 
     static INVENTORY: Lazy<SegmentMetaInventory> = Lazy::new(SegmentMetaInventory::default);
 
@@ -131,7 +170,7 @@ mod tests {
             index_writer.set_merge_policy(Box::new(log_merge_policy));
 
             // after every commit the merge checker is started, it will merge only segments with 1
-            // element in it because of the max_merge_size.
+            // element in it because of the max_docs_before_merge.
             index_writer.add_document(doc!(int_field=>1_u64))?;
             index_writer.commit()?;
 
@@ -287,5 +326,50 @@ mod tests {
         assert_eq!(result_list[0].0[0], test_input[2].id());
         assert_eq!(result_list[0].0[1], test_input[4].id());
         assert_eq!(result_list[0].0[2], test_input[5].id());
+    }
+
+    #[test]
+    fn test_merge_single_segment_with_deletes_below_threshold() {
+        let mut test_merge_policy = test_merge_policy();
+        test_merge_policy.set_del_docs_ratio_before_merge(0.25f32);
+        let test_input = vec![create_random_segment_meta(40_000).with_delete_meta(10_000, 1)];
+        let merge_candidates = test_merge_policy.compute_merge_candidates(&test_input);
+        assert!(merge_candidates.is_empty());
+    }
+
+    #[test]
+    fn test_merge_single_segment_with_deletes_above_threshold() {
+        let mut test_merge_policy = test_merge_policy();
+        test_merge_policy.set_del_docs_ratio_before_merge(0.25f32);
+        let test_input = vec![create_random_segment_meta(40_000).with_delete_meta(10_001, 1)];
+        let merge_candidates = test_merge_policy.compute_merge_candidates(&test_input);
+        assert_eq!(merge_candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_segments_with_deletes_above_threshold_all_in_level() {
+        let mut test_merge_policy = test_merge_policy();
+        test_merge_policy.set_del_docs_ratio_before_merge(0.25f32);
+        let test_input = vec![
+            create_random_segment_meta(40_000).with_delete_meta(10_001, 1),
+            create_random_segment_meta(40_000),
+        ];
+        let merge_candidates = test_merge_policy.compute_merge_candidates(&test_input);
+        assert_eq!(merge_candidates.len(), 1);
+        assert_eq!(merge_candidates[0].0.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_segments_with_deletes_above_threshold_different_level_not_involved() {
+        let mut test_merge_policy = test_merge_policy();
+        test_merge_policy.set_del_docs_ratio_before_merge(0.25f32);
+        let test_input = vec![
+            create_random_segment_meta(100),
+            create_random_segment_meta(40_000).with_delete_meta(10_001, 1),
+        ];
+        let merge_candidates = test_merge_policy.compute_merge_candidates(&test_input);
+        assert_eq!(merge_candidates.len(), 1);
+        assert_eq!(merge_candidates[0].0.len(), 1);
+        assert_eq!(merge_candidates[0].0[0], test_input[1].id());
     }
 }

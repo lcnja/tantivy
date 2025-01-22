@@ -1,9 +1,9 @@
-use crate::fastfield::AliveBitSet;
-use crate::query::explanation::does_not_match;
-use crate::query::{Explanation, Query, Scorer, Weight};
-use crate::{DocId, DocSet, Score, Searcher, SegmentReader, Term};
-use std::collections::BTreeMap;
 use std::fmt;
+
+use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
+use crate::fastfield::AliveBitSet;
+use crate::query::{EnableScoring, Explanation, Query, Scorer, Weight};
+use crate::{DocId, DocSet, Score, SegmentReader, Term};
 
 /// `BoostQuery` is a wrapper over a query used to boost its score.
 ///
@@ -38,9 +38,9 @@ impl fmt::Debug for BoostQuery {
 }
 
 impl Query for BoostQuery {
-    fn weight(&self, searcher: &Searcher, scoring_enabled: bool) -> crate::Result<Box<dyn Weight>> {
-        let weight_without_boost = self.query.weight(searcher, scoring_enabled)?;
-        let boosted_weight = if scoring_enabled {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let weight_without_boost = self.query.weight(enable_scoring)?;
+        let boosted_weight = if enable_scoring.is_scoring_enabled() {
             Box::new(BoostWeight::new(weight_without_boost, self.boost))
         } else {
             weight_without_boost
@@ -48,17 +48,19 @@ impl Query for BoostQuery {
         Ok(boosted_weight)
     }
 
-    fn query_terms(&self, terms: &mut BTreeMap<Term, bool>) {
-        self.query.query_terms(terms)
+    fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
+        self.query.query_terms(visitor)
     }
 }
 
-pub(crate) struct BoostWeight {
+/// Weight associated to the BoostQuery.
+pub struct BoostWeight {
     weight: Box<dyn Weight>,
     boost: Score,
 }
 
 impl BoostWeight {
+    /// Creates a new BoostWeight.
     pub fn new(weight: Box<dyn Weight>, boost: Score) -> Self {
         BoostWeight { weight, boost }
     }
@@ -70,13 +72,10 @@ impl Weight for BoostWeight {
     }
 
     fn explain(&self, reader: &SegmentReader, doc: u32) -> crate::Result<Explanation> {
-        let mut scorer = self.scorer(reader, 1.0)?;
-        if scorer.seek(doc) != doc {
-            return Err(does_not_match(doc));
-        }
-        let mut explanation =
-            Explanation::new(format!("Boost x{} of ...", self.boost), scorer.score());
         let underlying_explanation = self.weight.explain(reader, doc)?;
+        let score = underlying_explanation.value() * self.boost;
+        let mut explanation =
+            Explanation::new_with_string(format!("Boost x{} of ...", self.boost), score);
         explanation.add_detail(underlying_explanation);
         Ok(explanation)
     }
@@ -106,7 +105,7 @@ impl<S: Scorer> DocSet for BoostScorer<S> {
         self.underlying.seek(target)
     }
 
-    fn fill_buffer(&mut self, buffer: &mut [DocId]) -> usize {
+    fn fill_buffer(&mut self, buffer: &mut [DocId; COLLECT_BLOCK_BUFFER_LEN]) -> usize {
         self.underlying.fill_buffer(buffer)
     }
 
@@ -138,14 +137,14 @@ mod tests {
     use super::BoostQuery;
     use crate::query::{AllQuery, Query};
     use crate::schema::Schema;
-    use crate::{DocAddress, Document, Index};
+    use crate::{DocAddress, Index, IndexWriter, TantivyDocument};
 
     #[test]
     fn test_boost_query_explain() -> crate::Result<()> {
         let schema = Schema::builder().build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests()?;
-        index_writer.add_document(Document::new())?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
+        index_writer.add_document(TantivyDocument::new())?;
         index_writer.commit()?;
         let reader = index.reader()?;
         let searcher = reader.searcher();
@@ -153,7 +152,7 @@ mod tests {
         let explanation = query.explain(&searcher, DocAddress::new(0, 0u32)).unwrap();
         assert_eq!(
             explanation.to_pretty_json(),
-            "{\n  \"value\": 0.2,\n  \"description\": \"Boost x0.2 of ...\",\n  \"details\": [\n    {\n      \"value\": 1.0,\n      \"description\": \"AllQuery\",\n      \"context\": []\n    }\n  ],\n  \"context\": []\n}"
+            "{\n  \"value\": 0.2,\n  \"description\": \"Boost x0.2 of ...\",\n  \"details\": [\n    {\n      \"value\": 1.0,\n      \"description\": \"AllQuery\"\n    }\n  ]\n}"
         );
         Ok(())
     }

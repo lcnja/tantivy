@@ -10,15 +10,15 @@ use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
 //       .take_while(|&&val| val < target)
 //       .count()
 /// ```
-///
+/// 
 /// the `start` argument is just used to hint that the response is
-/// greater than beyond `start`. the implementation may or may not use
+/// greater than beyond `start`. The implementation may or may not use
 /// it for optimization.
 ///
 /// # Assumption
 ///
 /// - The block is sorted. Some elements may appear several times. This is the case at the
-/// end of the last block for instance.
+///   end of the last block for instance.
 /// - The target is assumed smaller or equal to the last element of the block.
 pub fn branchless_binary_search(arr: &[u32; COMPRESSION_BLOCK_SIZE], target: u32) -> usize {
     let mut start = 0;
@@ -35,11 +35,13 @@ pub fn branchless_binary_search(arr: &[u32; COMPRESSION_BLOCK_SIZE], target: u32
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use proptest::prelude::*;
+
     use super::branchless_binary_search;
     use crate::docset::TERMINATED;
     use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
-    use proptest::prelude::*;
-    use std::collections::HashSet;
 
     fn search_in_block_trivial_but_slow(block: &[u32], target: u32) -> usize {
         block.iter().take_while(|&&val| val < target).count()

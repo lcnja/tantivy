@@ -1,14 +1,11 @@
-use super::Collector;
-use super::SegmentCollector;
-use crate::collector::Fruit;
-use crate::DocId;
-use crate::Score;
-use crate::SegmentOrdinal;
-use crate::SegmentReader;
-use crate::TantivyError;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
+use super::{Collector, SegmentCollector};
+use crate::collector::Fruit;
+use crate::{DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
+
+/// MultiFruit keeps Fruits from every nested Collector
 pub struct MultiFruit {
     sub_fruits: Vec<Option<Box<dyn Fruit>>>,
 }
@@ -55,8 +52,14 @@ impl<TCollector: Collector> Collector for CollectorWrapper<TCollector> {
 impl SegmentCollector for Box<dyn BoxableSegmentCollector> {
     type Fruit = Box<dyn Fruit>;
 
+    #[inline]
     fn collect(&mut self, doc: u32, score: Score) {
         self.as_mut().collect(doc, score);
+    }
+
+    #[inline]
+    fn collect_block(&mut self, docs: &[DocId]) {
+        self.as_mut().collect_block(docs);
     }
 
     fn harvest(self) -> Box<dyn Fruit> {
@@ -66,6 +69,11 @@ impl SegmentCollector for Box<dyn BoxableSegmentCollector> {
 
 pub trait BoxableSegmentCollector {
     fn collect(&mut self, doc: u32, score: Score);
+    fn collect_block(&mut self, docs: &[DocId]) {
+        for &doc in docs {
+            self.collect(doc, 0.0);
+        }
+    }
     fn harvest_from_box(self: Box<Self>) -> Box<dyn Fruit>;
 }
 
@@ -74,8 +82,13 @@ pub struct SegmentCollectorWrapper<TSegmentCollector: SegmentCollector>(TSegment
 impl<TSegmentCollector: SegmentCollector> BoxableSegmentCollector
     for SegmentCollectorWrapper<TSegmentCollector>
 {
+    #[inline]
     fn collect(&mut self, doc: u32, score: Score) {
         self.0.collect(doc, score);
+    }
+    #[inline]
+    fn collect_block(&mut self, docs: &[DocId]) {
+        self.0.collect_block(docs);
     }
 
     fn harvest_from_box(self: Box<Self>) -> Box<dyn Fruit> {
@@ -83,12 +96,17 @@ impl<TSegmentCollector: SegmentCollector> BoxableSegmentCollector
     }
 }
 
+/// FruitHandle stores reference to the corresponding collector inside MultiCollector
 pub struct FruitHandle<TFruit: Fruit> {
     pos: usize,
     _phantom: PhantomData<TFruit>,
 }
 
 impl<TFruit: Fruit> FruitHandle<TFruit> {
+    /// Extract a typed fruit off a multifruit.
+    ///
+    /// This function involves downcasting and can panic if the multifruit was
+    /// created using faulty code.
     pub fn extract(self, fruits: &mut MultiFruit) -> TFruit {
         let boxed_fruit = fruits.sub_fruits[self.pos].take().expect("");
         *boxed_fruit
@@ -104,7 +122,8 @@ impl<TFruit: Fruit> FruitHandle<TFruit> {
 ///
 /// If the type of the collectors is known, you can just group yours collectors
 /// in a tuple. See the
-/// [Combining several collectors section of the collector documentation](./index.html#combining-several-collectors).
+/// [Combining several collectors section of the collector
+/// documentation](./index.html#combining-several-collectors).
 ///
 /// ```rust
 /// use tantivy::collector::{Count, TopDocs, MultiCollector};
@@ -117,7 +136,7 @@ impl<TFruit: Fruit> FruitHandle<TFruit> {
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let schema = schema_builder.build();
 /// let index = Index::create_in_ram(schema);
-/// let mut index_writer = index.writer(3_000_000)?;
+/// let mut index_writer = index.writer(15_000_000)?;
 /// index_writer.add_document(doc!(title => "The Name of the Wind"))?;
 /// index_writer.add_document(doc!(title => "The Diary of Muadib"))?;
 /// index_writer.add_document(doc!(title => "A Dairy Cow"))?;
@@ -142,7 +161,7 @@ impl<TFruit: Fruit> FruitHandle<TFruit> {
 /// # Ok(())
 /// # }
 /// ```
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 #[derive(Default)]
 pub struct MultiCollector<'a> {
     collector_wrappers: Vec<
@@ -171,7 +190,7 @@ impl<'a> MultiCollector<'a> {
     }
 }
 
-impl<'a> Collector for MultiCollector<'a> {
+impl Collector for MultiCollector<'_> {
     type Fruit = MultiFruit;
     type Child = MultiCollectorChild;
 
@@ -248,10 +267,8 @@ mod tests {
     use super::*;
     use crate::collector::{Count, TopDocs};
     use crate::query::TermQuery;
-    use crate::schema::IndexRecordOption;
-    use crate::schema::{Schema, TEXT};
-    use crate::Index;
-    use crate::Term;
+    use crate::schema::{IndexRecordOption, Schema, TEXT};
+    use crate::{Index, Term};
 
     #[test]
     fn test_multi_collector() -> crate::Result<()> {

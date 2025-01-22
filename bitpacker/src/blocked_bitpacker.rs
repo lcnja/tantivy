@@ -1,12 +1,11 @@
+use super::bitpacker::BitPacker;
+use super::compute_num_bits;
 use crate::{minmax, BitUnpacker};
-
-use super::{bitpacker::BitPacker, compute_num_bits};
 
 const BLOCK_SIZE: usize = 128;
 
 /// `BlockedBitpacker` compresses data in blocks of
 /// 128 elements, while keeping an index on it
-///
 #[derive(Debug, Clone)]
 pub struct BlockedBitpacker {
     // bitpacked blocks
@@ -59,12 +58,14 @@ fn metadata_test() {
     assert_eq!(meta.num_bits(), 6);
 }
 
+fn mem_usage<T>(items: &Vec<T>) -> usize {
+    items.capacity() * std::mem::size_of::<T>()
+}
+
 impl BlockedBitpacker {
     pub fn new() -> Self {
-        let mut compressed_blocks = vec![];
-        compressed_blocks.resize(8, 0);
         Self {
-            compressed_blocks,
+            compressed_blocks: vec![0; 8],
             buffer: vec![],
             offset_and_bits: vec![],
         }
@@ -74,16 +75,14 @@ impl BlockedBitpacker {
     pub fn mem_usage(&self) -> usize {
         std::mem::size_of::<BlockedBitpacker>()
             + self.compressed_blocks.capacity()
-            + self.offset_and_bits.capacity()
-                * std::mem::size_of_val(&self.offset_and_bits.get(0).cloned().unwrap_or_default())
-            + self.buffer.capacity()
-                * std::mem::size_of_val(&self.buffer.get(0).cloned().unwrap_or_default())
+            + mem_usage(&self.offset_and_bits)
+            + mem_usage(&self.buffer)
     }
 
     #[inline]
     pub fn add(&mut self, val: u64) {
         self.buffer.push(val);
-        if self.buffer.len() == BLOCK_SIZE as usize {
+        if self.buffer.len() == BLOCK_SIZE {
             self.flush();
         }
     }
@@ -125,11 +124,11 @@ impl BlockedBitpacker {
     }
     #[inline]
     pub fn get(&self, idx: usize) -> u64 {
-        let metadata_pos = idx / BLOCK_SIZE as usize;
-        let pos_in_block = idx % BLOCK_SIZE as usize;
+        let metadata_pos = idx / BLOCK_SIZE;
+        let pos_in_block = idx % BLOCK_SIZE;
         if let Some(metadata) = self.offset_and_bits.get(metadata_pos) {
             let unpacked = BitUnpacker::new(metadata.num_bits()).get(
-                pos_in_block as u64,
+                pos_in_block as u32,
                 &self.compressed_blocks[metadata.offset() as usize..],
             );
             unpacked + metadata.base_value()

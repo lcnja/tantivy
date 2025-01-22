@@ -6,10 +6,9 @@ mod block;
 mod skip_index;
 mod skip_index_builder;
 
-use crate::DocId;
-
 pub use self::skip_index::SkipIndex;
 pub use self::skip_index_builder::SkipIndexBuilder;
+use crate::DocId;
 
 /// A checkpoint contains meta-information about
 /// a block. Either a block of documents, or another block
@@ -42,22 +41,20 @@ mod tests {
 
     use std::io;
 
-    use futures::executor::block_on;
-    use proptest::strategy::{BoxedStrategy, Strategy};
-
-    use crate::directory::OwnedBytes;
-    use crate::indexer::NoMergePolicy;
-    use crate::schema::{SchemaBuilder, STORED, STRING};
-    use crate::store::index::Checkpoint;
-    use crate::{DocAddress, DocId, Index, Term};
+    use proptest::prelude::*;
 
     use super::{SkipIndex, SkipIndexBuilder};
+    use crate::directory::OwnedBytes;
+    use crate::indexer::NoMergePolicy;
+    use crate::schema::{SchemaBuilder, STORED, TEXT};
+    use crate::store::index::Checkpoint;
+    use crate::{DocAddress, DocId, Index, IndexWriter, TantivyDocument, Term};
 
     #[test]
     fn test_skip_index_empty() -> io::Result<()> {
         let mut output: Vec<u8> = Vec::new();
         let skip_index_builder: SkipIndexBuilder = SkipIndexBuilder::new();
-        skip_index_builder.write(&mut output)?;
+        skip_index_builder.serialize_into(&mut output)?;
         let skip_index: SkipIndex = SkipIndex::open(OwnedBytes::new(output));
         let mut skip_cursor = skip_index.checkpoints();
         assert!(skip_cursor.next().is_none());
@@ -73,7 +70,7 @@ mod tests {
             byte_range: 0..3,
         };
         skip_index_builder.insert(checkpoint.clone());
-        skip_index_builder.write(&mut output)?;
+        skip_index_builder.serialize_into(&mut output)?;
         let skip_index: SkipIndex = SkipIndex::open(OwnedBytes::new(output));
         let mut skip_cursor = skip_index.checkpoints();
         assert_eq!(skip_cursor.next(), Some(checkpoint));
@@ -111,7 +108,7 @@ mod tests {
         for checkpoint in &checkpoints {
             skip_index_builder.insert(checkpoint.clone());
         }
-        skip_index_builder.write(&mut output)?;
+        skip_index_builder.serialize_into(&mut output)?;
 
         let skip_index: SkipIndex = SkipIndex::open(OwnedBytes::new(output));
         assert_eq!(
@@ -128,11 +125,11 @@ mod tests {
     #[test]
     fn test_merge_store_with_stacking_reproducing_issue969() -> crate::Result<()> {
         let mut schema_builder = SchemaBuilder::default();
-        let text = schema_builder.add_text_field("text", STORED | STRING);
+        let text = schema_builder.add_text_field("text", STORED | TEXT);
         let body = schema_builder.add_text_field("body", STORED);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests()?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.set_merge_policy(Box::new(NoMergePolicy));
         let long_text: String = "abcdefghijklmnopqrstuvwxyz".repeat(1_000);
         for _ in 0..20 {
@@ -147,12 +144,12 @@ mod tests {
         index_writer.delete_term(Term::from_field_text(text, "testb"));
         index_writer.commit()?;
         let segment_ids = index.searchable_segment_ids()?;
-        block_on(index_writer.merge(&segment_ids))?;
+        index_writer.merge(&segment_ids).wait().unwrap();
         let reader = index.reader()?;
         let searcher = reader.searcher();
         assert_eq!(searcher.num_docs(), 30);
         for i in 0..searcher.num_docs() as u32 {
-            let _doc = searcher.doc(DocAddress::new(0u32, i))?;
+            let _doc = searcher.doc::<TantivyDocument>(DocAddress::new(0u32, i))?;
         }
         Ok(())
     }
@@ -170,7 +167,7 @@ mod tests {
         for checkpoint in &checkpoints {
             skip_index_builder.insert(checkpoint.clone());
         }
-        skip_index_builder.write(&mut output)?;
+        skip_index_builder.serialize_into(&mut output)?;
         assert_eq!(output.len(), 4035);
         let resulting_checkpoints: Vec<Checkpoint> = SkipIndex::open(OwnedBytes::new(output))
             .checkpoints()
@@ -196,8 +193,8 @@ mod tests {
         (0..max_len)
             .prop_flat_map(move |len: usize| {
                 (
-                    proptest::collection::vec(1usize..20, len as usize).prop_map(integrate_delta),
-                    proptest::collection::vec(1usize..26, len as usize).prop_map(integrate_delta),
+                    proptest::collection::vec(1usize..20, len).prop_map(integrate_delta),
+                    proptest::collection::vec(1usize..26, len).prop_map(integrate_delta),
                 )
                     .prop_map(|(docs, offsets)| {
                         (0..docs.len() - 1)
@@ -224,13 +221,11 @@ mod tests {
         if let Some(last_checkpoint) = checkpoints.last() {
             for doc in 0u32..last_checkpoint.doc_range.end {
                 let expected = seek_manual(skip_index.checkpoints(), doc);
-                assert_eq!(expected, skip_index.seek(doc), "Doc {}", doc);
+                assert_eq!(expected, skip_index.seek(doc), "Doc {doc}");
             }
             assert!(skip_index.seek(last_checkpoint.doc_range.end).is_none());
         }
     }
-
-    use proptest::prelude::*;
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(20))]
@@ -241,7 +236,7 @@ mod tests {
                  skip_index_builder.insert(checkpoint);
              }
              let mut buffer = Vec::new();
-             skip_index_builder.write(&mut buffer).unwrap();
+             skip_index_builder.serialize_into(&mut buffer).unwrap();
              let skip_index = SkipIndex::open(OwnedBytes::new(buffer));
              let iter_checkpoints: Vec<Checkpoint> = skip_index.checkpoints().collect();
              assert_eq!(&checkpoints[..], &iter_checkpoints[..]);

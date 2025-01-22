@@ -1,8 +1,9 @@
-use crate::positions::COMPRESSION_BLOCK_SIZE;
-use crate::postings::compression::BlockEncoder;
-use crate::postings::compression::VIntEncoder;
-use common::{BinarySerializable, CountingWriter, VInt};
 use std::io::{self, Write};
+
+use common::{BinarySerializable, CountingWriter, VInt};
+
+use crate::positions::COMPRESSION_BLOCK_SIZE;
+use crate::postings::compression::{BlockEncoder, VIntEncoder};
 
 /// The PositionSerializer is in charge of serializing all of the positions
 /// of all of the terms of a given field.
@@ -32,7 +33,7 @@ impl<W: io::Write> PositionSerializer<W> {
     /// at this point.
     /// When called before writing the positions of a term, this value is used as
     /// start offset.
-    /// When called after writing the positions of a term, this value is used as a
+    /// When called after writing the positions of a term, this value is used as
     /// end offset.
     pub fn written_bytes(&self) -> u64 {
         self.positions_wrt.written_bytes()
@@ -61,8 +62,9 @@ impl<W: io::Write> PositionSerializer<W> {
             return;
         }
         if self.block.len() == COMPRESSION_BLOCK_SIZE {
-            let (bit_width, block_encoded): (u8, &[u8]) =
-                self.block_encoder.compress_block_unsorted(&self.block[..]);
+            let (bit_width, block_encoded): (u8, &[u8]) = self
+                .block_encoder
+                .compress_block_unsorted(&self.block[..], false);
             self.bit_widths.push(bit_width);
             self.positions_buffer.extend(block_encoded);
         } else {
@@ -73,7 +75,7 @@ impl<W: io::Write> PositionSerializer<W> {
         self.block.clear();
     }
 
-    /// Close the positions for the given term.
+    /// Close the positions for the current term.
     pub fn close_term(&mut self) -> io::Result<()> {
         self.flush_block();
         VInt(self.bit_widths.len() as u64).serialize(&mut self.positions_wrt)?;

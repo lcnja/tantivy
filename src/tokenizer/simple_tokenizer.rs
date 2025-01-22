@@ -1,39 +1,44 @@
-use super::BoxTokenStream;
-use super::{Token, TokenStream, Tokenizer};
 use std::str::CharIndices;
 
-/// Tokenize the text by splitting on whitespaces and punctuation.
-#[derive(Clone)]
-pub struct SimpleTokenizer;
+use super::{Token, TokenStream, Tokenizer};
 
-pub struct SimpleTokenStream<'a> {
-    text: &'a str,
-    chars: CharIndices<'a>,
+/// Tokenize the text by splitting on whitespaces and punctuation.
+#[derive(Clone, Default)]
+pub struct SimpleTokenizer {
     token: Token,
 }
 
+/// TokenStream produced by the `SimpleTokenizer`.
+pub struct SimpleTokenStream<'a> {
+    text: &'a str,
+    chars: CharIndices<'a>,
+    token: &'a mut Token,
+}
+
 impl Tokenizer for SimpleTokenizer {
-    fn token_stream<'a>(&self, text: &'a str) -> BoxTokenStream<'a> {
-        BoxTokenStream::from(SimpleTokenStream {
+    type TokenStream<'a> = SimpleTokenStream<'a>;
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> SimpleTokenStream<'a> {
+        self.token.reset();
+        SimpleTokenStream {
             text,
             chars: text.char_indices(),
-            token: Token::default(),
-        })
+            token: &mut self.token,
+        }
     }
 }
 
-impl<'a> SimpleTokenStream<'a> {
+impl SimpleTokenStream<'_> {
     // search for the end of the current token.
     fn search_token_end(&mut self) -> usize {
         (&mut self.chars)
-            .filter(|&(_, ref c)| !c.is_alphanumeric())
+            .filter(|(_, c)| !c.is_alphanumeric())
             .map(|(offset, _)| offset)
             .next()
-            .unwrap_or_else(|| self.text.len())
+            .unwrap_or(self.text.len())
     }
 }
 
-impl<'a> TokenStream for SimpleTokenStream<'a> {
+impl TokenStream for SimpleTokenStream<'_> {
     fn advance(&mut self) -> bool {
         self.token.text.clear();
         self.token.position = self.token.position.wrapping_add(1);
@@ -50,11 +55,11 @@ impl<'a> TokenStream for SimpleTokenStream<'a> {
     }
 
     fn token(&self) -> &Token {
-        &self.token
+        self.token
     }
 
     fn token_mut(&mut self) -> &mut Token {
-        &mut self.token
+        self.token
     }
 }
 
@@ -74,7 +79,7 @@ mod tests {
     }
 
     fn token_stream_helper(text: &str) -> Vec<Token> {
-        let a = TextAnalyzer::from(SimpleTokenizer);
+        let mut a = TextAnalyzer::from(SimpleTokenizer::default());
         let mut token_stream = a.token_stream(text);
         let mut tokens: Vec<Token> = vec![];
         let mut add_token = |token: &Token| {

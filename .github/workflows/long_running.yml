@@ -1,4 +1,4 @@
-name: Rust
+name: Long running tests
 
 on:
   push:
@@ -8,17 +8,26 @@ env:
   CARGO_TERM_COLOR: always
   NUM_FUNCTIONAL_TEST_ITERATIONS: 20000
 
+# Ensures that we cancel running jobs for the same PR / same workflow.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  functional_test_unsorted:
+  test:
+
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - name: Install stable
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
     - name: Run indexing_unsorted
       run: cargo test indexing_unsorted -- --ignored
-  functional_test_sorted:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
     - name: Run indexing_sorted
       run: cargo test indexing_sorted -- --ignored
-

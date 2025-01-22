@@ -1,8 +1,6 @@
-use futures::channel::oneshot;
-use futures::{Future, TryFutureExt};
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::sync::Weak;
+use std::sync::{Arc, RwLock, Weak};
+
+use crate::FutureResult;
 
 /// Cloneable wrapper for callbacks registered when watching files of a `Directory`.
 #[derive(Clone)]
@@ -34,6 +32,7 @@ pub struct WatchCallbackList {
 /// file change is detected.
 #[must_use = "This `WatchHandle` controls the lifetime of the watch and should therefore be used."]
 #[derive(Clone)]
+#[expect(dead_code)]
 pub struct WatchHandle(Arc<WatchCallback>);
 
 impl WatchHandle {
@@ -75,12 +74,11 @@ impl WatchCallbackList {
     }
 
     /// Triggers all callbacks
-    pub fn broadcast(&self) -> impl Future<Output = ()> {
+    pub fn broadcast(&self) -> FutureResult<()> {
         let callbacks = self.list_callback();
-        let (sender, receiver) = oneshot::channel();
-        let result = receiver.unwrap_or_else(|_| ());
+        let (result, sender) = FutureResult::create("One of the callback panicked.");
         if callbacks.is_empty() {
-            let _ = sender.send(());
+            let _ = sender.send(Ok(()));
             return result;
         }
         let spawn_res = std::thread::Builder::new()
@@ -89,7 +87,7 @@ impl WatchCallbackList {
                 for callback in callbacks {
                     callback.call();
                 }
-                let _ = sender.send(());
+                let _ = sender.send(Ok(()));
             });
         if let Err(err) = spawn_res {
             error!(
@@ -103,11 +101,11 @@ impl WatchCallbackList {
 
 #[cfg(test)]
 mod tests {
-    use crate::directory::{WatchCallback, WatchCallbackList};
-    use futures::executor::block_on;
     use std::mem;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    use crate::directory::{WatchCallback, WatchCallbackList};
 
     #[test]
     fn test_watch_event_router_simple() {
@@ -117,22 +115,18 @@ mod tests {
         let inc_callback = WatchCallback::new(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
-        block_on(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(0, counter.load(Ordering::SeqCst));
         let handle_a = watch_event_router.subscribe(inc_callback);
         assert_eq!(0, counter.load(Ordering::SeqCst));
-        block_on(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(1, counter.load(Ordering::SeqCst));
-        block_on(async {
-            (
-                watch_event_router.broadcast().await,
-                watch_event_router.broadcast().await,
-                watch_event_router.broadcast().await,
-            )
-        });
+        watch_event_router.broadcast().wait().unwrap();
+        watch_event_router.broadcast().wait().unwrap();
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(4, counter.load(Ordering::SeqCst));
         mem::drop(handle_a);
-        block_on(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(4, counter.load(Ordering::SeqCst));
     }
 
@@ -149,19 +143,15 @@ mod tests {
         let handle_a = watch_event_router.subscribe(inc_callback(1));
         let handle_a2 = watch_event_router.subscribe(inc_callback(10));
         assert_eq!(0, counter.load(Ordering::SeqCst));
-        block_on(async {
-            futures::join!(
-                watch_event_router.broadcast(),
-                watch_event_router.broadcast()
-            )
-        });
+        watch_event_router.broadcast().wait().unwrap();
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(22, counter.load(Ordering::SeqCst));
         mem::drop(handle_a);
-        block_on(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(32, counter.load(Ordering::SeqCst));
         mem::drop(handle_a2);
-        block_on(watch_event_router.broadcast());
-        block_on(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(32, counter.load(Ordering::SeqCst));
     }
 
@@ -175,15 +165,12 @@ mod tests {
         });
         let handle_a = watch_event_router.subscribe(inc_callback);
         assert_eq!(0, counter.load(Ordering::SeqCst));
-        block_on(async {
-            let future1 = watch_event_router.broadcast();
-            let future2 = watch_event_router.broadcast();
-            futures::join!(future1, future2)
-        });
+        watch_event_router.broadcast().wait().unwrap();
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(2, counter.load(Ordering::SeqCst));
         mem::drop(handle_a);
-        let _ = watch_event_router.broadcast();
-        block_on(watch_event_router.broadcast());
+        drop(watch_event_router.broadcast());
+        watch_event_router.broadcast().wait().unwrap();
         assert_eq!(2, counter.load(Ordering::SeqCst));
     }
 }

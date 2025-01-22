@@ -1,5 +1,5 @@
 use super::{Token, TokenStream, Tokenizer};
-use crate::tokenizer::BoxTokenStream;
+use crate::TantivyError;
 
 /// Tokenize the text by splitting words into n-grams of the given size(s)
 ///
@@ -21,7 +21,8 @@ use crate::tokenizer::BoxTokenStream;
 /// | Position | 0   | 0   | 0     | 0     |
 /// | Offsets  | 0,2 | 0,3 | 0,4   | 0,5   |
 ///
-/// Example 3: `hεllo` (non-ascii) would be tokenized as (min_gram: 2, max_gram: 5, prefix_only: **true**)
+/// Example 3: `hεllo` (non-ascii) would be tokenized as (min_gram: 2, max_gram: 5, prefix_only:
+/// **true**)
 ///
 /// | Term     | hε  | hεl | hεll  | hεllo |
 /// |----------|-----|-----|-------|-------|
@@ -33,7 +34,7 @@ use crate::tokenizer::BoxTokenStream;
 /// ```rust
 /// use tantivy::tokenizer::*;
 ///
-/// let tokenizer = NgramTokenizer::new(2, 3, false);
+/// let mut tokenizer = NgramTokenizer::new(2, 3, false).unwrap();
 /// let mut stream = tokenizer.token_stream("hello");
 /// {
 ///     let token = stream.next().unwrap();
@@ -79,7 +80,7 @@ use crate::tokenizer::BoxTokenStream;
 /// }
 /// assert!(stream.next().is_none());
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NgramTokenizer {
     /// min size of the n-gram
     min_gram: usize,
@@ -87,33 +88,44 @@ pub struct NgramTokenizer {
     max_gram: usize,
     /// if true, will only parse the leading edge of the input
     prefix_only: bool,
+    token: Token,
 }
 
 impl NgramTokenizer {
     /// Configures a new Ngram tokenizer
-    pub fn new(min_gram: usize, max_gram: usize, prefix_only: bool) -> NgramTokenizer {
-        assert!(min_gram > 0, "min_gram must be greater than 0");
-        assert!(
-            min_gram <= max_gram,
-            "min_gram must not be greater than max_gram"
-        );
-        NgramTokenizer {
+    pub fn new(
+        min_gram: usize,
+        max_gram: usize,
+        prefix_only: bool,
+    ) -> crate::Result<NgramTokenizer> {
+        if min_gram == 0 {
+            return Err(TantivyError::InvalidArgument(
+                "min_gram must be greater than 0".to_string(),
+            ));
+        }
+        if min_gram > max_gram {
+            return Err(TantivyError::InvalidArgument(
+                "min_gram must not be greater than max_gram".to_string(),
+            ));
+        }
+        Ok(NgramTokenizer {
             min_gram,
             max_gram,
             prefix_only,
-        }
+            token: Token::default(),
+        })
     }
 
     /// Create a `NGramTokenizer` which generates tokens for all inner ngrams.
     ///
     /// This is as opposed to only prefix ngrams    .
-    pub fn all_ngrams(min_gram: usize, max_gram: usize) -> NgramTokenizer {
+    pub fn all_ngrams(min_gram: usize, max_gram: usize) -> crate::Result<NgramTokenizer> {
         Self::new(min_gram, max_gram, false)
     }
 
     /// Create a `NGramTokenizer` which only generates tokens for the
     /// prefix ngrams.
-    pub fn prefix_only(min_gram: usize, max_gram: usize) -> NgramTokenizer {
+    pub fn prefix_only(min_gram: usize, max_gram: usize) -> crate::Result<NgramTokenizer> {
         Self::new(min_gram, max_gram, true)
     }
 }
@@ -127,12 +139,14 @@ pub struct NgramTokenStream<'a> {
     /// input
     text: &'a str,
     /// output
-    token: Token,
+    token: &'a mut Token,
 }
 
 impl Tokenizer for NgramTokenizer {
-    fn token_stream<'a>(&self, text: &'a str) -> BoxTokenStream<'a> {
-        From::from(NgramTokenStream {
+    type TokenStream<'a> = NgramTokenStream<'a>;
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> NgramTokenStream<'a> {
+        self.token.reset();
+        NgramTokenStream {
             ngram_charidx_iterator: StutteringIterator::new(
                 CodepointFrontiers::for_str(text),
                 self.min_gram,
@@ -140,12 +154,12 @@ impl Tokenizer for NgramTokenizer {
             ),
             prefix_only: self.prefix_only,
             text,
-            token: Token::default(),
-        })
+            token: &mut self.token,
+        }
     }
 }
 
-impl<'a> TokenStream for NgramTokenStream<'a> {
+impl TokenStream for NgramTokenStream<'_> {
     fn advance(&mut self) -> bool {
         if let Some((offset_from, offset_to)) = self.ngram_charidx_iterator.next() {
             if self.prefix_only && offset_from > 0 {
@@ -163,10 +177,10 @@ impl<'a> TokenStream for NgramTokenStream<'a> {
     }
 
     fn token(&self) -> &Token {
-        &self.token
+        self.token
     }
     fn token_mut(&mut self) -> &mut Token {
-        &mut self.token
+        self.token
     }
 }
 
@@ -178,7 +192,7 @@ impl<'a> TokenStream for NgramTokenStream<'a> {
 /// The elements are emitted in the order of appearance
 /// of `a` first, `b` then.
 ///
-/// See `test_stutterring_iterator` for an example of its
+/// See `test_stuttering_iterator` for an example of its
 /// output.
 struct StutteringIterator<T> {
     underlying: T,
@@ -191,8 +205,7 @@ struct StutteringIterator<T> {
 }
 
 impl<T> StutteringIterator<T>
-where
-    T: Iterator<Item = usize>,
+where T: Iterator<Item = usize>
 {
     pub fn new(mut underlying: T, min_gram: usize, max_gram: usize) -> StutteringIterator<T> {
         assert!(min_gram > 0);
@@ -221,8 +234,7 @@ where
 }
 
 impl<T> Iterator for StutteringIterator<T>
-where
-    T: Iterator<Item = usize>,
+where T: Iterator<Item = usize>
 {
     type Item = (usize, usize);
 
@@ -256,7 +268,7 @@ where
 /// Emits all of the offsets where a codepoint starts
 /// or a codepoint ends.
 ///
-/// By convention, we emit [0] for the empty string.
+/// By convention, we emit `[0]` for the empty string.
 struct CodepointFrontiers<'a> {
     s: &'a str,
     next_el: Option<usize>,
@@ -271,7 +283,7 @@ impl<'a> CodepointFrontiers<'a> {
     }
 }
 
-impl<'a> Iterator for CodepointFrontiers<'a> {
+impl Iterator for CodepointFrontiers<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<usize> {
@@ -302,15 +314,11 @@ fn utf8_codepoint_width(b: u8) -> usize {
 #[cfg(test)]
 mod tests {
 
-    use super::utf8_codepoint_width;
-    use super::CodepointFrontiers;
-    use super::NgramTokenizer;
-    use super::StutteringIterator;
+    use super::{utf8_codepoint_width, CodepointFrontiers, NgramTokenizer, StutteringIterator};
     use crate::tokenizer::tests::assert_token;
-    use crate::tokenizer::tokenizer::Tokenizer;
-    use crate::tokenizer::{BoxTokenStream, Token};
+    use crate::tokenizer::{Token, TokenStream, Tokenizer};
 
-    fn test_helper(mut tokenizer: BoxTokenStream) -> Vec<Token> {
+    fn test_helper<T: TokenStream>(mut tokenizer: T) -> Vec<Token> {
         let mut tokens: Vec<Token> = vec![];
         tokenizer.process(&mut |token: &Token| tokens.push(token.clone()));
         tokens
@@ -351,7 +359,11 @@ mod tests {
 
     #[test]
     fn test_ngram_tokenizer_1_2_false() {
-        let tokens = test_helper(NgramTokenizer::all_ngrams(1, 2).token_stream("hello"));
+        let tokens = test_helper(
+            NgramTokenizer::all_ngrams(1, 2)
+                .unwrap()
+                .token_stream("hello"),
+        );
         assert_eq!(tokens.len(), 9);
         assert_token(&tokens[0], 0, "h", 0, 1);
         assert_token(&tokens[1], 0, "he", 0, 2);
@@ -366,7 +378,11 @@ mod tests {
 
     #[test]
     fn test_ngram_tokenizer_min_max_equal() {
-        let tokens = test_helper(NgramTokenizer::all_ngrams(3, 3).token_stream("hello"));
+        let tokens = test_helper(
+            NgramTokenizer::all_ngrams(3, 3)
+                .unwrap()
+                .token_stream("hello"),
+        );
         assert_eq!(tokens.len(), 3);
         assert_token(&tokens[0], 0, "hel", 0, 3);
         assert_token(&tokens[1], 0, "ell", 1, 4);
@@ -375,7 +391,11 @@ mod tests {
 
     #[test]
     fn test_ngram_tokenizer_2_5_prefix() {
-        let tokens = test_helper(NgramTokenizer::prefix_only(2, 5).token_stream("frankenstein"));
+        let tokens = test_helper(
+            NgramTokenizer::prefix_only(2, 5)
+                .unwrap()
+                .token_stream("frankenstein"),
+        );
         assert_eq!(tokens.len(), 4);
         assert_token(&tokens[0], 0, "fr", 0, 2);
         assert_token(&tokens[1], 0, "fra", 0, 3);
@@ -385,7 +405,11 @@ mod tests {
 
     #[test]
     fn test_ngram_non_ascii_1_2() {
-        let tokens = test_helper(NgramTokenizer::all_ngrams(1, 2).token_stream("hεllo"));
+        let tokens = test_helper(
+            NgramTokenizer::all_ngrams(1, 2)
+                .unwrap()
+                .token_stream("hεllo"),
+        );
         assert_eq!(tokens.len(), 9);
         assert_token(&tokens[0], 0, "h", 0, 1);
         assert_token(&tokens[1], 0, "hε", 0, 3);
@@ -400,7 +424,11 @@ mod tests {
 
     #[test]
     fn test_ngram_non_ascii_2_5_prefix() {
-        let tokens = test_helper(NgramTokenizer::prefix_only(2, 5).token_stream("hεllo"));
+        let tokens = test_helper(
+            NgramTokenizer::prefix_only(2, 5)
+                .unwrap()
+                .token_stream("hεllo"),
+        );
         assert_eq!(tokens.len(), 4);
         assert_token(&tokens[0], 0, "hε", 0, 3);
         assert_token(&tokens[1], 0, "hεl", 0, 4);
@@ -410,33 +438,37 @@ mod tests {
 
     #[test]
     fn test_ngram_empty() {
-        let tokens = test_helper(NgramTokenizer::all_ngrams(1, 5).token_stream(""));
+        let tokens = test_helper(NgramTokenizer::all_ngrams(1, 5).unwrap().token_stream(""));
         assert!(tokens.is_empty());
-        let tokens = test_helper(NgramTokenizer::all_ngrams(2, 5).token_stream(""));
+        let tokens = test_helper(NgramTokenizer::all_ngrams(2, 5).unwrap().token_stream(""));
         assert!(tokens.is_empty());
     }
 
     #[test]
     #[should_panic(expected = "min_gram must be greater than 0")]
     fn test_ngram_min_max_interval_empty() {
-        test_helper(NgramTokenizer::all_ngrams(0, 2).token_stream("hellossss"));
+        test_helper(
+            NgramTokenizer::all_ngrams(0, 2)
+                .unwrap()
+                .token_stream("hellossss"),
+        );
     }
 
     #[test]
     #[should_panic(expected = "min_gram must not be greater than max_gram")]
     fn test_invalid_interval_should_panic_if_smaller() {
-        NgramTokenizer::all_ngrams(2, 1);
+        NgramTokenizer::all_ngrams(2, 1).unwrap();
     }
 
     #[test]
-    fn test_stutterring_iterator_empty() {
+    fn test_stuttering_iterator_empty() {
         let rg: Vec<usize> = vec![0];
         let mut it = StutteringIterator::new(rg.into_iter(), 1, 2);
         assert_eq!(it.next(), None);
     }
 
     #[test]
-    fn test_stutterring_iterator() {
+    fn test_stuterring_iterator() {
         let mut it = StutteringIterator::new(0..10, 1, 2);
         assert_eq!(it.next(), Some((0, 1)));
         assert_eq!(it.next(), Some((0, 2)));

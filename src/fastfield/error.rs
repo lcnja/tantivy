@@ -1,5 +1,6 @@
-use crate::schema::FieldEntry;
 use std::result;
+
+use crate::schema::FieldEntry;
 
 /// `FastFieldNotAvailableError` is returned when the
 /// user requested for a fast field reader, and the field was not
@@ -7,7 +8,7 @@ use std::result;
 #[derive(Debug, Error)]
 #[error("Fast field not available: '{field_name:?}'")]
 pub struct FastFieldNotAvailableError {
-    field_name: String,
+    pub(crate) field_name: String,
 }
 
 impl FastFieldNotAvailableError {

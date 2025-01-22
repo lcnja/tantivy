@@ -1,24 +1,24 @@
 use super::IndexWriter;
-use crate::Opstamp;
-use futures::executor::block_on;
+use crate::schema::document::Document;
+use crate::{FutureResult, Opstamp, TantivyDocument};
 
 /// A prepared commit
-pub struct PreparedCommit<'a> {
-    index_writer: &'a mut IndexWriter,
+pub struct PreparedCommit<'a, D: Document = TantivyDocument> {
+    index_writer: &'a mut IndexWriter<D>,
     payload: Option<String>,
     opstamp: Opstamp,
 }
 
-impl<'a> PreparedCommit<'a> {
-    pub(crate) fn new(index_writer: &'a mut IndexWriter, opstamp: Opstamp) -> PreparedCommit<'_> {
-        PreparedCommit {
+impl<'a, D: Document> PreparedCommit<'a, D> {
+    pub(crate) fn new(index_writer: &'a mut IndexWriter<D>, opstamp: Opstamp) -> Self {
+        Self {
             index_writer,
             payload: None,
             opstamp,
         }
     }
 
-    /// Returns the opstamp associated to the prepared commit.
+    /// Returns the opstamp associated with the prepared commit.
     pub fn opstamp(&self) -> Opstamp {
         self.opstamp
     }
@@ -34,9 +34,9 @@ impl<'a> PreparedCommit<'a> {
     }
 
     /// Proceeds to commit.
-    /// See `.commit_async()`.
+    /// See `.commit_future()`.
     pub fn commit(self) -> crate::Result<Opstamp> {
-        block_on(self.commit_async())
+        self.commit_future().wait()
     }
 
     /// Proceeds to commit.
@@ -44,12 +44,10 @@ impl<'a> PreparedCommit<'a> {
     /// Unfortunately, contrary to what `PrepareCommit` may suggests,
     /// this operation is not at all really light.
     /// At this point deletes have not been flushed yet.
-    pub async fn commit_async(self) -> crate::Result<Opstamp> {
+    pub fn commit_future(self) -> FutureResult<Opstamp> {
         info!("committing {}", self.opstamp);
         self.index_writer
             .segment_updater()
             .schedule_commit(self.opstamp, self.payload)
-            .await?;
-        Ok(self.opstamp)
     }
 }

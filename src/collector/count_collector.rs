@@ -1,9 +1,6 @@
 use super::Collector;
 use crate::collector::SegmentCollector;
-use crate::DocId;
-use crate::Score;
-use crate::SegmentOrdinal;
-use crate::SegmentReader;
+use crate::{DocId, Score, SegmentOrdinal, SegmentReader};
 
 /// `CountCollector` collector only counts how many
 /// documents match the query.
@@ -19,7 +16,7 @@ use crate::SegmentReader;
 /// let schema = schema_builder.build();
 /// let index = Index::create_in_ram(schema);
 ///
-/// let mut index_writer = index.writer(3_000_000).unwrap();
+/// let mut index_writer = index.writer(15_000_000).unwrap();
 /// index_writer.add_document(doc!(title => "The Name of the Wind")).unwrap();
 /// index_writer.add_document(doc!(title => "The Diary of Muadib")).unwrap();
 /// index_writer.add_document(doc!(title => "A Dairy Cow")).unwrap();
@@ -80,8 +77,7 @@ impl SegmentCollector for SegmentCountCollector {
 #[cfg(test)]
 mod tests {
     use super::{Count, SegmentCountCollector};
-    use crate::collector::Collector;
-    use crate::collector::SegmentCollector;
+    use crate::collector::{Collector, SegmentCollector};
 
     #[test]
     fn test_count_collect_does_not_requires_scoring() {

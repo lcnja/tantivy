@@ -1,27 +1,14 @@
 mod executor;
-pub mod index;
-mod index_meta;
-mod inverted_index_reader;
+#[doc(hidden)]
+pub mod json_utils;
 pub mod searcher;
-mod segment;
-mod segment_component;
-mod segment_id;
-mod segment_reader;
 
-pub use self::executor::Executor;
-pub use self::index::{Index, IndexBuilder};
-pub use self::index_meta::{
-    IndexMeta, IndexSettings, IndexSortByField, Order, SegmentMeta, SegmentMetaInventory,
-};
-pub use self::inverted_index_reader::InvertedIndexReader;
-pub use self::searcher::Searcher;
-pub use self::segment::Segment;
-pub use self::segment_component::SegmentComponent;
-pub use self::segment_id::SegmentId;
-pub use self::segment_reader::SegmentReader;
+use std::path::Path;
 
 use once_cell::sync::Lazy;
-use std::path::Path;
+
+pub use self::executor::Executor;
+pub use self::searcher::{Searcher, SearcherGeneration};
 
 /// The meta file contains all the information about the list of segments and the schema
 /// of the index.
@@ -33,3 +20,6 @@ pub static META_FILEPATH: Lazy<&'static Path> = Lazy::new(|| Path::new("meta.jso
 /// Removing this file is safe, but will prevent the garbage collection of all of the file that
 /// are currently in the directory
 pub static MANAGED_FILEPATH: Lazy<&'static Path> = Lazy::new(|| Path::new(".managed.json"));
+
+#[cfg(test)]
+mod tests;

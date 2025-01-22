@@ -1,13 +1,11 @@
-use crate::space_usage::ByteCount;
-use crate::DocId;
-use common::intersect_bitsets;
-use common::BitSet;
-use common::ReadOnlyBitSet;
-use ownedbytes::OwnedBytes;
 use std::io;
 use std::io::Write;
 
-/// Write a alive `BitSet`
+use common::{intersect_bitsets, BitSet, ByteCount, OwnedBytes, ReadOnlyBitSet};
+
+use crate::DocId;
+
+/// Write an alive `BitSet`
 ///
 /// where `alive_bitset` is the set of alive `DocId`.
 /// Warning: this function does not call terminate. The caller is in charge of
@@ -50,24 +48,19 @@ impl AliveBitSet {
         Self::open(alive_bitset_bytes)
     }
 
-    pub(crate) fn from_bitset(bitset: &BitSet) -> AliveBitSet {
-        let readonly_bitset = ReadOnlyBitSet::from(bitset);
-        AliveBitSet::from(readonly_bitset)
-    }
-
-    /// Opens a delete bitset given its file.
+    /// Opens an alive bitset given its file.
     pub fn open(bytes: OwnedBytes) -> AliveBitSet {
         let bitset = ReadOnlyBitSet::open(bytes);
         AliveBitSet::from(bitset)
     }
 
-    /// Returns true iff the document is still "alive". In other words, if it has not been deleted.
+    /// Returns true if the document is still "alive". In other words, if it has not been deleted.
     #[inline]
     pub fn is_alive(&self, doc: DocId) -> bool {
         self.bitset.contains(doc)
     }
 
-    /// Returns true iff the document has been marked as deleted.
+    /// Returns true if the document has been marked as deleted.
     #[inline]
     pub fn is_deleted(&self, doc: DocId) -> bool {
         !self.is_alive(doc)
@@ -79,13 +72,13 @@ impl AliveBitSet {
         self.bitset.iter()
     }
 
-    /// Get underlying bitset
+    /// Get underlying bitset.
     #[inline]
     pub fn bitset(&self) -> &ReadOnlyBitSet {
         &self.bitset
     }
 
-    /// The number of deleted docs
+    /// The number of alive documents.
     pub fn num_alive_docs(&self) -> usize {
         self.num_alive_docs
     }
@@ -168,14 +161,15 @@ mod tests {
 #[cfg(all(test, feature = "unstable"))]
 mod bench {
 
-    use super::AliveBitSet;
     use rand::prelude::IteratorRandom;
     use rand::thread_rng;
     use test::Bencher;
 
+    use super::AliveBitSet;
+
     fn get_alive() -> Vec<u32> {
         let mut data = (0..1_000_000_u32).collect::<Vec<u32>>();
-        for _ in 0..(1_000_000) * 1 / 8 {
+        for _ in 0..1_000_000 / 8 {
             remove_rand(&mut data);
         }
         data
@@ -187,14 +181,14 @@ mod bench {
     }
 
     #[bench]
-    fn bench_deletebitset_iter_deser_on_fly(bench: &mut Bencher) {
+    fn bench_alive_bitset_iter_deser_on_fly(bench: &mut Bencher) {
         let alive_bitset = AliveBitSet::for_test_from_deleted_docs(&[0, 1, 1000, 10000], 1_000_000);
 
         bench.iter(|| alive_bitset.iter_alive().collect::<Vec<_>>());
     }
 
     #[bench]
-    fn bench_deletebitset_access(bench: &mut Bencher) {
+    fn bench_alive_bitset_access(bench: &mut Bencher) {
         let alive_bitset = AliveBitSet::for_test_from_deleted_docs(&[0, 1, 1000, 10000], 1_000_000);
 
         bench.iter(|| {
@@ -205,14 +199,14 @@ mod bench {
     }
 
     #[bench]
-    fn bench_deletebitset_iter_deser_on_fly_1_8_alive(bench: &mut Bencher) {
+    fn bench_alive_bitset_iter_deser_on_fly_1_8_alive(bench: &mut Bencher) {
         let alive_bitset = AliveBitSet::for_test_from_deleted_docs(&get_alive(), 1_000_000);
 
         bench.iter(|| alive_bitset.iter_alive().collect::<Vec<_>>());
     }
 
     #[bench]
-    fn bench_deletebitset_access_1_8_alive(bench: &mut Bencher) {
+    fn bench_alive_bitset_access_1_8_alive(bench: &mut Bencher) {
         let alive_bitset = AliveBitSet::for_test_from_deleted_docs(&get_alive(), 1_000_000);
 
         bench.iter(|| {
