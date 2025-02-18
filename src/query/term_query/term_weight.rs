@@ -1,16 +1,14 @@
 use super::term_scorer::TermScorer;
-use crate::core::SegmentReader;
-use crate::docset::DocSet;
+use crate::docset::{DocSet, COLLECT_BLOCK_BUFFER_LEN};
 use crate::fieldnorm::FieldNormReader;
+use crate::index::SegmentReader;
 use crate::postings::SegmentPostings;
 use crate::query::bm25::Bm25Weight;
 use crate::query::explanation::does_not_match;
-use crate::query::weight::for_each_scorer;
-use crate::query::Weight;
-use crate::query::{Explanation, Scorer};
+use crate::query::weight::{for_each_docset_buffered, for_each_scorer};
+use crate::query::{Explanation, Scorer, Weight};
 use crate::schema::IndexRecordOption;
-use crate::Term;
-use crate::{DocId, Score};
+use crate::{DocId, Score, Term};
 
 pub struct TermWeight {
     term: Term,
@@ -31,11 +29,7 @@ impl Weight for TermWeight {
             return Err(does_not_match(doc));
         }
         let mut explanation = scorer.explain();
-        explanation.add_context(format!(
-            "Term ={:?}:{:?}",
-            self.term.field(),
-            self.term.value_bytes()
-        ));
+        explanation.add_context(format!("Term={:?}", self.term,));
         Ok(explanation)
     }
 
@@ -59,6 +53,19 @@ impl Weight for TermWeight {
     ) -> crate::Result<()> {
         let mut scorer = self.specialized_scorer(reader, 1.0)?;
         for_each_scorer(&mut scorer, callback);
+        Ok(())
+    }
+
+    /// Iterates through all of the document matched by the DocSet
+    /// `DocSet` and push the scored documents to the collector.
+    fn for_each_no_score(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut dyn FnMut(&[DocId]),
+    ) -> crate::Result<()> {
+        let mut scorer = self.specialized_scorer(reader, 1.0)?;
+        let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
+        for_each_docset_buffered(&mut scorer, &mut buffer, callback);
         Ok(())
     }
 
@@ -99,6 +106,10 @@ impl TermWeight {
         }
     }
 
+    pub fn term(&self) -> &Term {
+        &self.term
+    }
+
     pub(crate) fn specialized_scorer(
         &self,
         reader: &SegmentReader,
@@ -106,11 +117,13 @@ impl TermWeight {
     ) -> crate::Result<TermScorer> {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
-        let fieldnorm_reader = if self.scoring_enabled {
-            reader.get_fieldnorms_reader(field)?
+        let fieldnorm_reader_opt = if self.scoring_enabled {
+            reader.fieldnorms_readers().get_field(field)?
         } else {
-            FieldNormReader::constant(reader.max_doc(), 1)
+            None
         };
+        let fieldnorm_reader =
+            fieldnorm_reader_opt.unwrap_or_else(|| FieldNormReader::constant(reader.max_doc(), 1));
         let similarity_weight = self.similarity_weight.boost_by(boost);
         let postings_opt: Option<SegmentPostings> =
             inverted_index.read_postings(&self.term, self.index_record_option)?;

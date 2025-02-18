@@ -1,19 +1,17 @@
-use crate::{indexer::doc_id_mapping::DocIdMapping, DocId};
-
-use super::fieldnorm_to_id;
-use super::FieldNormsSerializer;
-use crate::schema::Field;
-use crate::schema::Schema;
+use std::cmp::Ordering;
 use std::{io, iter};
+
+use super::{fieldnorm_to_id, FieldNormsSerializer};
+use crate::schema::{Field, Schema};
+use crate::DocId;
 
 /// The `FieldNormsWriter` is in charge of tracking the fieldnorm byte
 /// of each document for each field with field norms.
 ///
-/// `FieldNormsWriter` stores a Vec<u8> for each tracked field, using a
+/// `FieldNormsWriter` stores a `Vec<u8>` for each tracked field, using a
 /// byte per document per field.
 pub struct FieldNormsWriter {
-    fields: Vec<Field>,
-    fieldnorms_buffer: Vec<Vec<u8>>,
+    fieldnorms_buffers: Vec<Option<Vec<u8>>>,
 }
 
 impl FieldNormsWriter {
@@ -23,7 +21,7 @@ impl FieldNormsWriter {
         schema
             .fields()
             .filter_map(|(field, field_entry)| {
-                if field_entry.is_indexed() {
+                if field_entry.is_indexed() && field_entry.has_fieldnorms() {
                     Some(field)
                 } else {
                     None
@@ -35,25 +33,20 @@ impl FieldNormsWriter {
     /// Initialize with state for tracking the field norm fields
     /// specified in the schema.
     pub fn for_schema(schema: &Schema) -> FieldNormsWriter {
-        let fields = FieldNormsWriter::fields_with_fieldnorm(schema);
-        let max_field = fields
-            .iter()
-            .map(Field::field_id)
-            .max()
-            .map(|max_field_id| max_field_id as usize + 1)
-            .unwrap_or(0);
-        FieldNormsWriter {
-            fields,
-            fieldnorms_buffer: iter::repeat_with(Vec::new)
-                .take(max_field)
-                .collect::<Vec<_>>(),
+        let mut fieldnorms_buffers: Vec<Option<Vec<u8>>> = iter::repeat_with(|| None)
+            .take(schema.num_fields())
+            .collect();
+        for field in FieldNormsWriter::fields_with_fieldnorm(schema) {
+            fieldnorms_buffers[field.field_id() as usize] = Some(Vec::with_capacity(1_000));
         }
+        FieldNormsWriter { fieldnorms_buffers }
     }
 
     /// The memory used inclusive childs
     pub fn mem_usage(&self) -> usize {
-        self.fieldnorms_buffer
+        self.fieldnorms_buffers
             .iter()
+            .flatten()
             .map(|buf| buf.capacity())
             .sum()
     }
@@ -62,8 +55,10 @@ impl FieldNormsWriter {
     ///
     /// Will extend with 0-bytes for documents that have not been seen.
     pub fn fill_up_to_max_doc(&mut self, max_doc: DocId) {
-        for field in self.fields.iter() {
-            self.fieldnorms_buffer[field.field_id() as usize].resize(max_doc as usize, 0u8);
+        for fieldnorms_buffer_opt in self.fieldnorms_buffers.iter_mut() {
+            if let Some(fieldnorms_buffer) = fieldnorms_buffer_opt.as_mut() {
+                fieldnorms_buffer.resize(max_doc as usize, 0u8);
+            }
         }
     }
 
@@ -76,34 +71,35 @@ impl FieldNormsWriter {
     /// * field     - the field being set
     /// * fieldnorm - the number of terms present in document `doc` in field `field`
     pub fn record(&mut self, doc: DocId, field: Field, fieldnorm: u32) {
-        let fieldnorm_buffer: &mut Vec<u8> = &mut self.fieldnorms_buffer[field.field_id() as usize];
-        assert!(
-            fieldnorm_buffer.len() <= doc as usize,
-            "Cannot register a given fieldnorm twice"
-        );
-        // we fill intermediary `DocId` as  having a fieldnorm of 0.
-        fieldnorm_buffer.resize(doc as usize + 1, 0u8);
-        fieldnorm_buffer[doc as usize] = fieldnorm_to_id(fieldnorm);
+        if let Some(fieldnorm_buffer) = self
+            .fieldnorms_buffers
+            .get_mut(field.field_id() as usize)
+            .and_then(Option::as_mut)
+        {
+            match fieldnorm_buffer.len().cmp(&(doc as usize)) {
+                Ordering::Less => {
+                    // we fill intermediary `DocId` as  having a fieldnorm of 0.
+                    fieldnorm_buffer.resize(doc as usize, 0u8);
+                }
+                Ordering::Equal => {}
+                Ordering::Greater => {
+                    panic!("Cannot register a given fieldnorm twice")
+                }
+            }
+            fieldnorm_buffer.push(fieldnorm_to_id(fieldnorm));
+        }
     }
 
     /// Serialize the seen fieldnorm values to the serializer for all fields.
-    pub fn serialize(
-        &self,
-        mut fieldnorms_serializer: FieldNormsSerializer,
-        doc_id_map: Option<&DocIdMapping>,
-    ) -> io::Result<()> {
-        for &field in self.fields.iter() {
-            let fieldnorm_values: &[u8] = &self.fieldnorms_buffer[field.field_id() as usize][..];
-            if let Some(doc_id_map) = doc_id_map {
-                let mut mapped_fieldnorm_values = vec![];
-                mapped_fieldnorm_values.resize(fieldnorm_values.len(), 0u8);
-                for (new_doc_id, old_doc_id) in doc_id_map.iter_old_doc_ids().enumerate() {
-                    mapped_fieldnorm_values[new_doc_id] = fieldnorm_values[old_doc_id as usize];
-                }
-                fieldnorms_serializer.serialize_field(field, &mapped_fieldnorm_values)?;
-            } else {
-                fieldnorms_serializer.serialize_field(field, fieldnorm_values)?;
-            }
+    pub fn serialize(&self, mut fieldnorms_serializer: FieldNormsSerializer) -> io::Result<()> {
+        for (field, fieldnorms_buffer) in self.fieldnorms_buffers.iter().enumerate().filter_map(
+            |(field_id, fieldnorms_buffer_opt)| {
+                fieldnorms_buffer_opt.as_ref().map(|fieldnorms_buffer| {
+                    (Field::from_field_id(field_id as u32), fieldnorms_buffer)
+                })
+            },
+        ) {
+            fieldnorms_serializer.serialize_field(field, fieldnorms_buffer)?;
         }
         fieldnorms_serializer.close()?;
         Ok(())

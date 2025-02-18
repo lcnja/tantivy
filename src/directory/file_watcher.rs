@@ -1,15 +1,15 @@
-use crate::directory::{WatchCallback, WatchCallbackList, WatchHandle};
-use crc32fast::Hasher;
-use std::fs;
-use std::io;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
+use std::{fs, io, thread};
 
-pub const POLLING_INTERVAL: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 500 });
+use crc32fast::Hasher;
+
+use crate::directory::{WatchCallback, WatchCallbackList, WatchHandle};
+
+const POLLING_INTERVAL: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 500 });
 
 // Watches a file and executes registered callbacks when the file is modified.
 pub struct FileWatcher {
@@ -43,15 +43,19 @@ impl FileWatcher {
         thread::Builder::new()
             .name("thread-tantivy-meta-file-watcher".to_string())
             .spawn(move || {
-                let mut current_checksum = None;
+                let mut current_checksum_opt = None;
 
                 while state.load(Ordering::SeqCst) == 1 {
                     if let Ok(checksum) = FileWatcher::compute_checksum(&path) {
-                        // `None.unwrap_or_else(|| !checksum) != checksum` evaluates to `true`
-                        if current_checksum.unwrap_or_else(|| !checksum) != checksum {
+                        let metafile_has_changed = current_checksum_opt
+                            .map(|current_checksum| current_checksum != checksum)
+                            .unwrap_or(true);
+                        if metafile_has_changed {
                             info!("Meta file {:?} was modified", path);
-                            current_checksum = Some(checksum);
-                            futures::executor::block_on(callbacks.broadcast());
+                            current_checksum_opt = Some(checksum);
+                            // We actually ignore callbacks failing here.
+                            // We just wait for the end of their execution.
+                            let _ = callbacks.broadcast().wait();
                         }
                     }
 
@@ -97,9 +101,8 @@ mod tests {
 
     use std::mem;
 
-    use crate::directory::mmap_directory::atomic_write;
-
     use super::*;
+    use crate::directory::mmap_directory::atomic_write;
 
     #[test]
     fn test_file_watcher_drop_watcher() -> crate::Result<()> {
@@ -107,7 +110,7 @@ mod tests {
         let tmp_file = tmp_dir.path().join("watched.txt");
 
         let counter: Arc<AtomicUsize> = Default::default();
-        let (tx, rx) = crossbeam::channel::unbounded();
+        let (tx, rx) = crossbeam_channel::unbounded();
         let timeout = Duration::from_millis(100);
 
         let watcher = FileWatcher::new(&tmp_file);
@@ -150,7 +153,7 @@ mod tests {
         let tmp_file = tmp_dir.path().join("watched.txt");
 
         let counter: Arc<AtomicUsize> = Default::default();
-        let (tx, rx) = crossbeam::channel::unbounded();
+        let (tx, rx) = crossbeam_channel::unbounded();
         let timeout = Duration::from_millis(100);
 
         let watcher = FileWatcher::new(&tmp_file);

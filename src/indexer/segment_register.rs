@@ -1,11 +1,9 @@
-use crate::core::SegmentId;
-use crate::core::SegmentMeta;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Debug, Display, Formatter};
+
+use crate::index::{SegmentId, SegmentMeta};
 use crate::indexer::delete_queue::DeleteCursor;
 use crate::indexer::segment_entry::SegmentEntry;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::Display;
-use std::fmt::{self, Debug, Formatter};
 
 /// The segment register keeps track
 /// of the list of segment, their size as well
@@ -105,7 +103,7 @@ impl SegmentRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{SegmentId, SegmentMetaInventory};
+    use crate::index::SegmentMetaInventory;
     use crate::indexer::delete_queue::*;
 
     fn segment_ids(segment_register: &SegmentRegister) -> Vec<SegmentId> {

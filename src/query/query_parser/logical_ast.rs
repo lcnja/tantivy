@@ -1,20 +1,24 @@
-use crate::query::Occur;
-use crate::schema::Field;
-use crate::schema::Term;
-use crate::schema::Type;
-use crate::Score;
 use std::fmt;
 use std::ops::Bound;
+
+use crate::query::Occur;
+use crate::schema::Term;
+use crate::Score;
 
 #[derive(Clone)]
 pub enum LogicalLiteral {
     Term(Term),
-    Phrase(Vec<(usize, Term)>),
+    Phrase {
+        terms: Vec<(usize, Term)>,
+        slop: u32,
+        prefix: bool,
+    },
     Range {
-        field: Field,
-        value_type: Type,
         lower: Bound<Term>,
         upper: Bound<Term>,
+    },
+    Set {
+        elements: Vec<Term>,
     },
     All,
 }
@@ -31,6 +35,34 @@ impl LogicalAst {
             self
         } else {
             LogicalAst::Boost(Box::new(self), boost)
+        }
+    }
+
+    pub fn simplify(self) -> LogicalAst {
+        match self {
+            LogicalAst::Clause(clauses) => {
+                let mut new_clauses: Vec<(Occur, LogicalAst)> = Vec::new();
+
+                for (occur, sub_ast) in clauses {
+                    let simplified_sub_ast = sub_ast.simplify();
+
+                    // If clauses below have the same `Occur`, we can pull them up
+                    match simplified_sub_ast {
+                        LogicalAst::Clause(sub_clauses)
+                            if (occur == Occur::Should || occur == Occur::Must)
+                                && sub_clauses.iter().all(|(o, _)| *o == occur) =>
+                        {
+                            for sub_clause in sub_clauses {
+                                new_clauses.push(sub_clause);
+                            }
+                        }
+                        _ => new_clauses.push((occur, simplified_sub_ast)),
+                    }
+                }
+
+                LogicalAst::Clause(new_clauses)
+            }
+            LogicalAst::Leaf(_) | LogicalAst::Boost(_, _) => self,
         }
     }
 }
@@ -50,17 +82,17 @@ impl fmt::Debug for LogicalAst {
                 if clause.is_empty() {
                     write!(formatter, "<emptyclause>")?;
                 } else {
-                    let (ref occur, ref subquery) = clause[0];
-                    write!(formatter, "({}{:?}", occur_letter(*occur), subquery)?;
-                    for &(ref occur, ref subquery) in &clause[1..] {
-                        write!(formatter, " {}{:?}", occur_letter(*occur), subquery)?;
+                    let (occur, subquery) = &clause[0];
+                    write!(formatter, "({}{subquery:?}", occur_letter(*occur))?;
+                    for (occur, subquery) in &clause[1..] {
+                        write!(formatter, " {}{subquery:?}", occur_letter(*occur))?;
                     }
                     formatter.write_str(")")?;
                 }
                 Ok(())
             }
-            LogicalAst::Boost(ref ast, boost) => write!(formatter, "{:?}^{}", ast, boost),
-            LogicalAst::Leaf(ref literal) => write!(formatter, "{:?}", literal),
+            LogicalAst::Boost(ref ast, boost) => write!(formatter, "{ast:?}^{boost}"),
+            LogicalAst::Leaf(ref literal) => write!(formatter, "{literal:?}"),
         }
     }
 }
@@ -74,13 +106,46 @@ impl From<LogicalLiteral> for LogicalAst {
 impl fmt::Debug for LogicalLiteral {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match *self {
-            LogicalLiteral::Term(ref term) => write!(formatter, "{:?}", term),
-            LogicalLiteral::Phrase(ref terms) => write!(formatter, "\"{:?}\"", terms),
+            LogicalLiteral::Term(ref term) => write!(formatter, "{term:?}"),
+            LogicalLiteral::Phrase {
+                ref terms,
+                slop,
+                prefix,
+            } => {
+                write!(formatter, "\"{terms:?}\"")?;
+                if slop > 0 {
+                    write!(formatter, "~{slop:?}")
+                } else if prefix {
+                    write!(formatter, "*")
+                } else {
+                    Ok(())
+                }
+            }
             LogicalLiteral::Range {
                 ref lower,
                 ref upper,
                 ..
-            } => write!(formatter, "({:?} TO {:?})", lower, upper),
+            } => write!(formatter, "({lower:?} TO {upper:?})"),
+            LogicalLiteral::Set { ref elements, .. } => {
+                const MAX_DISPLAYED: usize = 10;
+
+                write!(formatter, "IN [")?;
+                for (i, element) in elements.iter().enumerate() {
+                    if i == 0 {
+                        write!(formatter, "{element:?}")?;
+                    } else if i == MAX_DISPLAYED - 1 {
+                        write!(
+                            formatter,
+                            ", {element:?}, ... ({} more)",
+                            elements.len() - i - 1
+                        )?;
+                        break;
+                    } else {
+                        write!(formatter, ", {element:?}")?;
+                    }
+                }
+                write!(formatter, "]")
+            }
             LogicalLiteral::All => write!(formatter, "*"),
         }
     }

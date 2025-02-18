@@ -1,8 +1,10 @@
-use crate::store::index::{Checkpoint, CHECKPOINT_PERIOD};
-use crate::DocId;
-use common::VInt;
 use std::io;
 use std::ops::Range;
+
+use common::{read_u32_vint, VInt};
+
+use crate::store::index::{Checkpoint, CHECKPOINT_PERIOD};
+use crate::DocId;
 
 /// Represents a block of checkpoints.
 ///
@@ -83,15 +85,15 @@ impl CheckpointBlock {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, ""));
         }
         self.checkpoints.clear();
-        let len = VInt::deserialize_u64(data)? as usize;
+        let len = read_u32_vint(data);
         if len == 0 {
             return Ok(());
         }
-        let mut doc = VInt::deserialize_u64(data)? as DocId;
+        let mut doc = read_u32_vint(data);
         let mut start_offset = VInt::deserialize_u64(data)? as usize;
         for _ in 0..len {
-            let num_docs = VInt::deserialize_u64(data)? as DocId;
-            let block_num_bytes = VInt::deserialize_u64(data)? as usize;
+            let num_docs = read_u32_vint(data);
+            let block_num_bytes = read_u32_vint(data) as usize;
             self.checkpoints.push(Checkpoint {
                 doc_range: doc..doc + num_docs,
                 byte_range: start_offset..start_offset + block_num_bytes,
@@ -105,10 +107,11 @@ impl CheckpointBlock {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use crate::store::index::block::CheckpointBlock;
     use crate::store::index::Checkpoint;
     use crate::DocId;
-    use std::io;
 
     fn test_aux_ser_deser(checkpoints: &[Checkpoint]) -> io::Result<()> {
         let mut block = CheckpointBlock::default();
@@ -140,6 +143,15 @@ mod tests {
         let checkpoints = vec![Checkpoint {
             doc_range: 10..12,
             byte_range: 100..120,
+        }];
+        test_aux_ser_deser(&checkpoints)
+    }
+
+    #[test]
+    fn test_block_serialize_large_byte_range() -> io::Result<()> {
+        let checkpoints = vec![Checkpoint {
+            doc_range: 10..12,
+            byte_range: 8_000_000_000..9_000_000_000,
         }];
         test_aux_ser_deser(&checkpoints)
     }

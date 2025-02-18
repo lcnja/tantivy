@@ -1,35 +1,26 @@
-use crate::schema::Document;
-use crate::schema::Term;
+use crate::query::Weight;
+use crate::schema::document::Document;
+use crate::schema::{TantivyDocument, Term};
 use crate::Opstamp;
 
 /// Timestamped Delete operation.
-#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct DeleteOperation {
     pub opstamp: Opstamp,
-    pub term: Term,
-}
-
-impl Default for DeleteOperation {
-    fn default() -> Self {
-        DeleteOperation {
-            opstamp: 0u64,
-            term: Term::new(),
-        }
-    }
+    pub target: Box<dyn Weight>,
 }
 
 /// Timestamped Add operation.
 #[derive(Eq, PartialEq, Debug)]
-pub struct AddOperation {
+pub struct AddOperation<D: Document = TantivyDocument> {
     pub opstamp: Opstamp,
-    pub document: Document,
+    pub document: D,
 }
 
 /// UserOperation is an enum type that encapsulates other operation types.
 #[derive(Eq, PartialEq, Debug)]
-pub enum UserOperation {
+pub enum UserOperation<D: Document = TantivyDocument> {
     /// Add operation
-    Add(Document),
+    Add(D),
     /// Delete operation
     Delete(Term),
 }

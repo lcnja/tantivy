@@ -1,34 +1,36 @@
-// # Basic Example
+// # Faceted Search
 //
-// This example covers the basic functionalities of
+// This example covers the faceted search functionalities of
 // tantivy.
 //
 // We will :
-// - define our schema
-// = create an index in a directory
-// - index few documents in our index
-// - search for the best document matchings "sea whale"
-// - retrieve the best document original content.
-
+// - define a text field "name" in our schema
+// - define a facet field "classification" in our schema
+// - create an index in memory
+// - index few documents with respective facets in our index
+// - search and count the number of documents that the classifications start the facet "/Felidae"
+// - Search the facet "/Felidae/Pantherinae" and count the number of documents that the
+//   classifications include the facet.
+//
 // ---
 // Importing tantivy...
 use tantivy::collector::FacetCollector;
 use tantivy::query::{AllQuery, TermQuery};
 use tantivy::schema::*;
-use tantivy::{doc, Index};
+use tantivy::{doc, Index, IndexWriter};
 
 fn main() -> tantivy::Result<()> {
     // Let's create a temporary directory for the sake of this example
     let mut schema_builder = Schema::builder();
 
-    let name = schema_builder.add_text_field("felin_name", TEXT | STORED);
+    let name = schema_builder.add_text_field("name", TEXT | STORED);
     // this is our faceted field: its scientific classification
     let classification = schema_builder.add_facet_field("classification", FacetOptions::default());
 
     let schema = schema_builder.build();
     let index = Index::create_in_ram(schema);
 
-    let mut index_writer = index.writer(30_000_000)?;
+    let mut index_writer: IndexWriter = index.writer(30_000_000)?;
 
     // For convenience, tantivy also comes with a macro to
     // reduce the boilerplate above.
@@ -69,7 +71,7 @@ fn main() -> tantivy::Result<()> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
     {
-        let mut facet_collector = FacetCollector::for_field(classification);
+        let mut facet_collector = FacetCollector::for_field("classification");
         facet_collector.add_facet("/Felidae");
         let facet_counts = searcher.search(&AllQuery, &facet_collector)?;
         // This lists all of the facet counts, right below "/Felidae".
@@ -95,7 +97,7 @@ fn main() -> tantivy::Result<()> {
         let facet = Facet::from("/Felidae/Pantherinae");
         let facet_term = Term::from_facet(classification, &facet);
         let facet_term_query = TermQuery::new(facet_term, IndexRecordOption::Basic);
-        let mut facet_collector = FacetCollector::for_field(classification);
+        let mut facet_collector = FacetCollector::for_field("classification");
         facet_collector.add_facet("/Felidae/Pantherinae");
         let facet_counts = searcher.search(&facet_term_query, &facet_collector)?;
         let facets: Vec<(&Facet, u64)> = facet_counts.get("/Felidae/Pantherinae").collect();

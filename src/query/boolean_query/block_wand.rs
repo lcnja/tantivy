@@ -1,8 +1,8 @@
+use std::ops::{Deref, DerefMut};
+
 use crate::query::term_query::TermScorer;
 use crate::query::Scorer;
 use crate::{DocId, DocSet, Score, TERMINATED};
-use std::ops::Deref;
-use std::ops::DerefMut;
 
 /// Takes a term_scorers sorted by their current doc() and a threshold and returns
 /// Returns (pivot_len, pivot_ord) defined as follows:
@@ -12,7 +12,7 @@ use std::ops::DerefMut;
 ///
 /// We always have `before_pivot_len` < `pivot_len`.
 ///
-/// None is returned if we establish that no document can exceed the threshold.
+/// `None` is returned if we establish that no document can exceed the threshold.
 fn find_pivot_doc(
     term_scorers: &[TermScorerWithMaxScore],
     threshold: Score,
@@ -47,7 +47,7 @@ fn find_pivot_doc(
 /// scorer in scorers[..pivot_len] and `scorer.doc()` for scorer in scorers[pivot_len..].
 /// Note: before and after calling this method, scorers need to be sorted by their `.doc()`.
 fn block_max_was_too_low_advance_one_scorer(
-    scorers: &mut Vec<TermScorerWithMaxScore>,
+    scorers: &mut [TermScorerWithMaxScore],
     pivot_len: usize,
 ) {
     debug_assert!(is_sorted(scorers.iter().map(|scorer| scorer.doc())));
@@ -82,7 +82,7 @@ fn block_max_was_too_low_advance_one_scorer(
 // Given a list of term_scorers and a `ord` and assuming that `term_scorers[ord]` is sorted
 // except term_scorers[ord] that might be in advance compared to its ranks,
 // bubble up term_scorers[ord] in order to restore the ordering.
-fn restore_ordering(term_scorers: &mut Vec<TermScorerWithMaxScore>, ord: usize) {
+fn restore_ordering(term_scorers: &mut [TermScorerWithMaxScore], ord: usize) {
     let doc = term_scorers[ord].doc();
     for i in ord + 1..term_scorers.len() {
         if term_scorers[i].doc() >= doc {
@@ -144,7 +144,7 @@ fn advance_all_scorers_on_pivot(term_scorers: &mut Vec<TermScorerWithMaxScore>, 
 
 /// Implements the WAND (Weak AND) algorithm for dynamic pruning
 /// described in the paper "Faster Top-k Document Retrieval Using Block-Max Indexes".
-/// Link: http://engineering.nyu.edu/~suel/papers/bmw.pdf
+/// Link: <http://engineering.nyu.edu/~suel/papers/bmw.pdf>
 pub fn block_wand(
     mut scorers: Vec<TermScorer>,
     mut threshold: Score,
@@ -212,14 +212,13 @@ pub fn block_wand(
 }
 
 /// Specialized version of [`block_wand`] for a single scorer.
-/// In this case, the algorithm is simple and readable and faster (~ x3)
+/// In this case, the algorithm is simple, readable and faster (~ x3)
 /// than the generic algorithm.
 /// The algorithm behaves as follows:
 /// - While we don't hit the end of the docset:
-///   - While the block max score is under the `threshold`, go to the
-///     next block.
-///   - On a block, advance until the end and execute `callback``
-///     when the doc score is greater or equal to the `threshold`.
+///   - While the block max score is under the `threshold`, go to the next block.
+///   - On a block, advance until the end and execute `callback` when the doc score is greater or
+///     equal to the `threshold`.
 pub fn block_wand_single_scorer(
     mut scorer: TermScorer,
     mut threshold: Score,
@@ -273,7 +272,7 @@ impl<'a> From<&'a mut TermScorer> for TermScorerWithMaxScore<'a> {
     }
 }
 
-impl<'a> Deref for TermScorerWithMaxScore<'a> {
+impl Deref for TermScorerWithMaxScore<'_> {
     type Target = TermScorer;
 
     fn deref(&self) -> &Self::Target {
@@ -281,7 +280,7 @@ impl<'a> Deref for TermScorerWithMaxScore<'a> {
     }
 }
 
-impl<'a> DerefMut for TermScorerWithMaxScore<'a> {
+impl DerefMut for TermScorerWithMaxScore<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.scorer
     }
@@ -301,15 +300,16 @@ fn is_sorted<I: Iterator<Item = DocId>>(mut it: I) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use crate::query::score_combiner::SumCombiner;
-    use crate::query::term_query::TermScorer;
-    use crate::query::Union;
-    use crate::query::{Bm25Weight, Scorer};
-    use crate::{DocId, DocSet, Score, TERMINATED};
-    use proptest::prelude::*;
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
     use std::iter;
+
+    use proptest::prelude::*;
+
+    use crate::query::score_combiner::SumCombiner;
+    use crate::query::term_query::TermScorer;
+    use crate::query::{Bm25Weight, BufferedUnionScorer, Scorer};
+    use crate::{DocId, DocSet, Score, TERMINATED};
 
     struct Float(Score);
 
@@ -371,7 +371,7 @@ mod tests {
     fn compute_checkpoints_manual(term_scorers: Vec<TermScorer>, n: usize) -> Vec<(DocId, Score)> {
         let mut heap: BinaryHeap<Float> = BinaryHeap::with_capacity(n);
         let mut checkpoints: Vec<(DocId, Score)> = Vec::new();
-        let mut scorer: Union<TermScorer, SumCombiner> = Union::from(term_scorers);
+        let mut scorer = BufferedUnionScorer::build(term_scorers, SumCombiner::default);
 
         let mut limit = Score::MIN;
         loop {
@@ -417,6 +417,7 @@ mod tests {
             .boxed()
     }
 
+    #[expect(clippy::type_complexity)]
     fn gen_term_scorers(num_scorers: usize) -> BoxedStrategy<(Vec<Vec<(DocId, u32)>>, Vec<u32>)> {
         (1u32..100u32)
             .prop_flat_map(move |max_doc: u32| {

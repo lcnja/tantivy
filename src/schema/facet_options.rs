@@ -1,6 +1,8 @@
-use crate::schema::flags::{IndexedFlag, SchemaFlagList, StoredFlag};
-use serde::{Deserialize, Serialize};
 use std::ops::BitOr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::schema::flags::{IndexedFlag, SchemaFlagList, StoredFlag};
 
 /// Define how a facet field should be handled by tantivy.
 ///
@@ -11,7 +13,8 @@ pub struct FacetOptions {
 }
 
 impl FacetOptions {
-    /// Returns true iff the value is stored.
+    /// Returns true if the value is stored.
+    #[inline]
     pub fn is_stored(&self) -> bool {
         self.stored
     }
@@ -20,6 +23,7 @@ impl FacetOptions {
     ///
     /// Only the fields that are set as *stored* are
     /// persisted into the Tantivy's store.
+    #[must_use]
     pub fn set_stored(mut self) -> FacetOptions {
         self.stored = true;
         self

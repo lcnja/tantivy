@@ -7,10 +7,11 @@
 // the list of documents containing a term, getting
 // its term frequency, and accessing its positions.
 
+use tantivy::postings::Postings;
 // ---
 // Importing tantivy...
 use tantivy::schema::*;
-use tantivy::{doc, DocSet, Index, Postings, TERMINATED};
+use tantivy::{doc, DocSet, Index, IndexWriter, TERMINATED};
 
 fn main() -> tantivy::Result<()> {
     // We first create a schema for the sake of the
@@ -24,10 +25,10 @@ fn main() -> tantivy::Result<()> {
 
     let index = Index::create_in_ram(schema);
 
-    let mut index_writer = index.writer_with_num_threads(1, 50_000_000)?;
+    let mut index_writer: IndexWriter = index.writer_with_num_threads(1, 50_000_000)?;
     index_writer.add_document(doc!(title => "The Old Man and the Sea"))?;
     index_writer.add_document(doc!(title => "Of Mice and Men"))?;
-    index_writer.add_document(doc!(title => "The modern Promotheus"))?;
+    index_writer.add_document(doc!(title => "The modern Prometheus"))?;
     index_writer.commit()?;
 
     let reader = index.reader()?;
@@ -44,7 +45,7 @@ fn main() -> tantivy::Result<()> {
         // A segment contains different data structure.
         // Inverted index stands for the combination of
         // - the term dictionary
-        // - the inverted lists associated to each terms and their positions
+        // - the inverted lists associated with each terms and their positions
         let inverted_index = segment_reader.inverted_index(title)?;
 
         // A `Term` is a text token associated with a field.
@@ -52,11 +53,11 @@ fn main() -> tantivy::Result<()> {
         let term_the = Term::from_field_text(title, "the");
 
         // This segment posting object is like a cursor over the documents matching the term.
-        // The `IndexRecordOption` arguments tells tantivy we will be interested in both term frequencies
-        // and positions.
+        // The `IndexRecordOption` arguments tells tantivy we will be interested in both term
+        // frequencies and positions.
         //
-        // If you don't need all this information, you may get better performance by decompressing less
-        // information.
+        // If you don't need all this information, you may get better performance by decompressing
+        // less information.
         if let Some(mut segment_postings) =
             inverted_index.read_postings(&term_the, IndexRecordOption::WithFreqsAndPositions)?
         {
@@ -84,7 +85,7 @@ fn main() -> tantivy::Result<()> {
                 // Doc 0: TermFreq 2: [0, 4]
                 // Doc 2: TermFreq 1: [0]
                 // ```
-                println!("Doc {}: TermFreq {}: {:?}", doc_id, term_freq, positions);
+                println!("Doc {doc_id}: TermFreq {term_freq}: {positions:?}");
                 doc_id = segment_postings.advance();
             }
         }
@@ -105,15 +106,15 @@ fn main() -> tantivy::Result<()> {
         // A segment contains different data structure.
         // Inverted index stands for the combination of
         // - the term dictionary
-        // - the inverted lists associated to each terms and their positions
+        // - the inverted lists associated with each terms and their positions
         let inverted_index = segment_reader.inverted_index(title)?;
 
         // This segment posting object is like a cursor over the documents matching the term.
-        // The `IndexRecordOption` arguments tells tantivy we will be interested in both term frequencies
-        // and positions.
+        // The `IndexRecordOption` arguments tells tantivy we will be interested in both term
+        // frequencies and positions.
         //
-        // If you don't need all this information, you may get better performance by decompressing less
-        // information.
+        // If you don't need all this information, you may get better performance by decompressing
+        // less information.
         if let Some(mut block_segment_postings) =
             inverted_index.read_block_postings(&term_the, IndexRecordOption::Basic)?
         {
@@ -125,7 +126,7 @@ fn main() -> tantivy::Result<()> {
                 // Once again these docs MAY contains deleted documents as well.
                 let docs = block_segment_postings.docs();
                 // Prints `Docs [0, 2].`
-                println!("Docs {:?}", docs);
+                println!("Docs {docs:?}");
                 block_segment_postings.advance();
             }
         }

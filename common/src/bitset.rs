@@ -1,8 +1,9 @@
-use ownedbytes::OwnedBytes;
-use std::convert::TryInto;
 use std::io::Write;
-use std::u64;
 use std::{fmt, io};
+
+use ownedbytes::OwnedBytes;
+
+use crate::ByteCount;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct TinySet(u64);
@@ -62,29 +63,30 @@ impl TinySet {
         self.0 = 0u64;
     }
 
-    #[inline]
     /// Returns the complement of the set in `[0, 64[`.
     ///
     /// Careful on making this function public, as it will break the padding handling in the last
     /// bucket.
+    #[inline]
     fn complement(self) -> TinySet {
         TinySet(!self.0)
     }
 
-    #[inline]
     /// Returns true iff the `TinySet` contains the element `el`.
+    #[inline]
     pub fn contains(self, el: u32) -> bool {
         !self.intersect(TinySet::singleton(el)).is_empty()
     }
 
-    #[inline]
     /// Returns the number of elements in the TinySet.
+    #[inline]
     pub fn len(self) -> u32 {
         self.0.count_ones()
     }
 
-    #[inline]
     /// Returns the intersection of `self` and `other`
+    #[inline]
+    #[must_use]
     pub fn intersect(self, other: TinySet) -> TinySet {
         TinySet(self.0 & other.0)
     }
@@ -98,12 +100,14 @@ impl TinySet {
 
     /// Insert a new element within [0..64)
     #[inline]
+    #[must_use]
     pub fn insert(self, el: u32) -> TinySet {
         self.union(TinySet::singleton(el))
     }
 
     /// Removes an element within [0..64)
     #[inline]
+    #[must_use]
     pub fn remove(self, el: u32) -> TinySet {
         self.intersect(TinySet::singleton(el).complement())
     }
@@ -130,6 +134,7 @@ impl TinySet {
 
     /// Returns the union of two tinysets
     #[inline]
+    #[must_use]
     pub fn union(self, other: TinySet) -> TinySet {
         TinySet(self.0 | other.0)
     }
@@ -147,7 +152,7 @@ impl TinySet {
         if self.is_empty() {
             None
         } else {
-            let lowest = self.0.trailing_zeros() as u32;
+            let lowest = self.0.trailing_zeros();
             self.0 ^= TinySet::singleton(lowest).0;
             Some(lowest)
         }
@@ -183,7 +188,6 @@ fn num_buckets(max_val: u32) -> u32 {
 
 impl BitSet {
     /// serialize a `BitSet`.
-    ///
     pub fn serialize<T: Write>(&self, writer: &mut T) -> io::Result<()> {
         writer.write_all(self.max_value.to_le_bytes().as_ref())?;
         for tinyset in self.tinysets.iter().cloned() {
@@ -256,11 +260,7 @@ impl BitSet {
         // we do not check saturated els.
         let higher = el / 64u32;
         let lower = el % 64u32;
-        self.len += if self.tinysets[higher as usize].insert_mut(lower) {
-            1
-        } else {
-            0
-        };
+        self.len += u64::from(self.tinysets[higher as usize].insert_mut(lower));
     }
 
     /// Inserts an element in the `BitSet`
@@ -269,11 +269,7 @@ impl BitSet {
         // we do not check saturated els.
         let higher = el / 64u32;
         let lower = el % 64u32;
-        self.len -= if self.tinysets[higher as usize].remove_mut(lower) {
-            1
-        } else {
-            0
-        };
+        self.len -= u64::from(self.tinysets[higher as usize].remove_mut(lower));
     }
 
     /// Returns true iff the elements is in the `BitSet`.
@@ -282,7 +278,7 @@ impl BitSet {
         self.tinyset(el / 64u32).contains(el % 64)
     }
 
-    /// Returns the first non-empty `TinySet` associated to a bucket lower
+    /// Returns the first non-empty `TinySet` associated with a bucket lower
     /// or greater than bucket.
     ///
     /// Reminder: the tiny set with the bucket `bucket`, represents the
@@ -349,7 +345,6 @@ impl ReadOnlyBitSet {
     }
 
     /// Iterate the tinyset on the fly from serialized data.
-    ///
     #[inline]
     fn iter_tinysets(&self) -> impl Iterator<Item = TinySet> + '_ {
         self.data.chunks_exact(8).map(move |chunk| {
@@ -359,7 +354,6 @@ impl ReadOnlyBitSet {
     }
 
     /// Iterate over the positions of the elements.
-    ///
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.iter_tinysets()
@@ -393,8 +387,8 @@ impl ReadOnlyBitSet {
     }
 
     /// Number of bytes used in the bitset representation.
-    pub fn num_bytes(&self) -> usize {
-        self.data.len()
+    pub fn num_bytes(&self) -> ByteCount {
+        self.data.len().into()
     }
 }
 
@@ -411,14 +405,14 @@ impl<'a> From<&'a BitSet> for ReadOnlyBitSet {
 #[cfg(test)]
 mod tests {
 
-    use super::BitSet;
-    use super::ReadOnlyBitSet;
-    use super::TinySet;
+    use std::collections::HashSet;
+
     use ownedbytes::OwnedBytes;
     use rand::distributions::Bernoulli;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::HashSet;
+
+    use super::{BitSet, ReadOnlyBitSet, TinySet};
 
     #[test]
     fn test_read_serialized_bitset_full_multi() {
@@ -428,7 +422,7 @@ mod tests {
             bitset.serialize(&mut out).unwrap();
 
             let bitset = ReadOnlyBitSet::open(OwnedBytes::new(out));
-            assert_eq!(bitset.len() as usize, i as usize);
+            assert_eq!(bitset.len(), i as usize);
         }
     }
 
@@ -439,7 +433,7 @@ mod tests {
         bitset.serialize(&mut out).unwrap();
 
         let bitset = ReadOnlyBitSet::open(OwnedBytes::new(out));
-        assert_eq!(bitset.len() as usize, 64 as usize);
+        assert_eq!(bitset.len(), 64);
     }
 
     #[test]
@@ -700,45 +694,5 @@ mod tests {
         for el in 0u32..1000u32 {
             assert!(!bitset.contains(el));
         }
-    }
-}
-
-#[cfg(all(test, feature = "unstable"))]
-mod bench {
-
-    use super::BitSet;
-    use super::TinySet;
-    use test;
-
-    #[bench]
-    fn bench_tinyset_pop(b: &mut test::Bencher) {
-        b.iter(|| {
-            let mut tinyset = TinySet::singleton(test::black_box(31u32));
-            tinyset.pop_lowest();
-            tinyset.pop_lowest();
-            tinyset.pop_lowest();
-            tinyset.pop_lowest();
-            tinyset.pop_lowest();
-            tinyset.pop_lowest();
-        });
-    }
-
-    #[bench]
-    fn bench_tinyset_sum(b: &mut test::Bencher) {
-        let tiny_set = TinySet::empty().insert(10u32).insert(14u32).insert(21u32);
-        b.iter(|| {
-            assert_eq!(test::black_box(tiny_set).into_iter().sum::<u32>(), 45u32);
-        });
-    }
-
-    #[bench]
-    fn bench_tinyarr_sum(b: &mut test::Bencher) {
-        let v = [10u32, 14u32, 21u32];
-        b.iter(|| test::black_box(v).iter().cloned().sum::<u32>());
-    }
-
-    #[bench]
-    fn bench_bitset_initialize(b: &mut test::Bencher) {
-        b.iter(|| BitSet::with_max_value(1_000_000));
     }
 }

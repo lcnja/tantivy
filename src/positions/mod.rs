@@ -1,23 +1,27 @@
 //! Tantivy can (if instructed to do so in the schema) store the term positions in a given field.
-//! This positions are expressed as token ordinal. For instance,
-//! In "The beauty and the beast", the term "the" appears in position 0 and position 4.
+//!
+//! This position is expressed as token ordinal. For instance,
+//! In "The beauty and the beast", the term "the" appears in position 0 and position 3.
 //! This information is useful to run phrase queries.
 //!
-//! The `SegmentComponent::POSITIONS` file contains all of the bitpacked positions delta,
-//! for all terms of a given field, one term after the other.
+//! The [position](crate::index::SegmentComponent::Positions) file contains all of the
+//! bitpacked positions delta, for all terms of a given field, one term after the other.
 //!
-//! Each terms is encoded independently.
-//! Like for positing lists, tantivy rely on simd bitpacking to encode the positions delta in blocks of 128 deltas.
-//! Because we rarely have a multiple of 128, a final block may encode the remaining values variable byte encoding.
+//! Each term is encoded independently.
+//! Like for posting lists, tantivy relies on simd bitpacking to encode the positions delta in
+//! blocks of 128 deltas. Because we rarely have a multiple of 128, the final block encodes
+//! the remaining values with variable int encoding.
 //!
-//! In order to make reading possible, the term delta positions first encodes the number of bitpacked blocks,
-//! then the bitwidth for each blocks, then the actual bitpacked block and finally the final variable int encoded block.
+//! In order to make reading possible, the term delta positions first encode the number of
+//! bitpacked blocks, then the bitwidth for each block, then the actual bitpacked blocks and finally
+//! the final variable int encoded block.
 //!
-//! Contrary to postings list, the reader does not have access on the number of positions that is encoded, and instead
-//! stops decoding the last block when its byte slice has been entirely read.
+//! Contrary to postings list, the reader does not have access on the number of positions that is
+//! encoded, and instead stops decoding the last block when its byte slice has been entirely read.
 //!
 //! More formally:
-//! * *Positions* := *NumBitPackedBlocks* *BitPackedPositionBlock*^(P/128) *BitPackedPositionsDeltaBitWidth* *VIntPosDeltas*?
+//! * *Positions* := *NumBitPackedBlocks* *BitPackedPositionBlock*^(P/128)
+//!   *BitPackedPositionsDeltaBitWidth* *VIntPosDeltas*?
 //! * *NumBitPackedBlocks**: := *P* / 128 encoded as a variable byte integer.
 //! * *BitPackedPositionBlock* := bit width encoded block of 128 positions delta
 //! * *BitPackedPositionsDeltaBitWidth* := (*BitWidth*: u8)^*NumBitPackedBlocks*
@@ -27,21 +31,24 @@
 mod reader;
 mod serializer;
 
+use bitpacking::{BitPacker, BitPacker4x};
+
 pub use self::reader::PositionReader;
 pub use self::serializer::PositionSerializer;
-use bitpacking::{BitPacker, BitPacker4x};
 
 const COMPRESSION_BLOCK_SIZE: usize = BitPacker4x::BLOCK_LEN;
 
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
+
+    use std::iter;
+
+    use proptest::prelude::*;
+    use proptest::sample::select;
 
     use super::PositionSerializer;
     use crate::directory::OwnedBytes;
     use crate::positions::reader::PositionReader;
-    use proptest::prelude::*;
-    use proptest::sample::select;
-    use std::iter;
 
     fn create_positions_data(vals: &[u32]) -> crate::Result<OwnedBytes> {
         let mut positions_buffer = vec![];
@@ -113,7 +120,7 @@ pub mod tests {
         serializer.close_term()?;
         serializer.close()?;
         let position_delta = OwnedBytes::new(positions_buffer);
-        let mut output_delta_pos_buffer = vec![0u32; 5];
+        let mut output_delta_pos_buffer = [0u32; 5];
         let mut position_reader = PositionReader::open(position_delta)?;
         position_reader.read(0, &mut output_delta_pos_buffer[..]);
         assert_eq!(

@@ -1,63 +1,27 @@
-use super::stacker::{Addr, MemoryArena, TermHashMap};
-
-use crate::postings::recorder::{
-    BufferLender, NothingRecorder, Recorder, TermFrequencyRecorder, TfAndPositionRecorder,
-};
-use crate::postings::UnorderedTermId;
-use crate::postings::{FieldSerializer, InvertedIndexSerializer};
-use crate::schema::IndexRecordOption;
-use crate::schema::{Field, FieldEntry, FieldType, Schema, Term};
-use crate::termdict::TermOrdinal;
-use crate::tokenizer::TokenStream;
-use crate::tokenizer::{Token, MAX_TOKEN_LEN};
-use crate::DocId;
-use crate::{fieldnorm::FieldNormReaders, indexer::doc_id_mapping::DocIdMapping};
-use fnv::FnvHashMap;
-use std::collections::HashMap;
 use std::io;
 use std::marker::PhantomData;
-use std::ops::{DerefMut, Range};
+use std::ops::Range;
 
-fn posting_from_field_entry(field_entry: &FieldEntry) -> Box<dyn PostingsWriter> {
-    match *field_entry.field_type() {
-        FieldType::Str(ref text_options) => text_options
-            .get_indexing_options()
-            .map(|indexing_options| match indexing_options.index_option() {
-                IndexRecordOption::Basic => {
-                    SpecializedPostingsWriter::<NothingRecorder>::new_boxed()
-                }
-                IndexRecordOption::WithFreqs => {
-                    SpecializedPostingsWriter::<TermFrequencyRecorder>::new_boxed()
-                }
-                IndexRecordOption::WithFreqsAndPositions => {
-                    SpecializedPostingsWriter::<TfAndPositionRecorder>::new_boxed()
-                }
-            })
-            .unwrap_or_else(SpecializedPostingsWriter::<NothingRecorder>::new_boxed),
-        FieldType::U64(_)
-        | FieldType::I64(_)
-        | FieldType::F64(_)
-        | FieldType::Date(_)
-        | FieldType::Bytes(_)
-        | FieldType::HierarchicalFacet(_) => {
-            SpecializedPostingsWriter::<NothingRecorder>::new_boxed()
-        }
-    }
-}
+use stacker::Addr;
 
-pub struct MultiFieldPostingsWriter {
-    heap: MemoryArena,
-    schema: Schema,
-    term_index: TermHashMap,
-    per_field_postings_writers: Vec<Box<dyn PostingsWriter>>,
-}
+use crate::fieldnorm::FieldNormReaders;
+use crate::indexer::path_to_unordered_id::OrderedPathId;
+use crate::postings::recorder::{BufferLender, Recorder};
+use crate::postings::{
+    FieldSerializer, IndexingContext, InvertedIndexSerializer, PerFieldPostingsWriter,
+};
+use crate::schema::{Field, Schema, Term, Type};
+use crate::tokenizer::{Token, TokenStream, MAX_TOKEN_LEN};
+use crate::DocId;
+
+const POSITION_GAP: u32 = 1;
 
 fn make_field_partition(
-    term_offsets: &[(&[u8], Addr, UnorderedTermId)],
+    term_offsets: &[(Field, OrderedPathId, &[u8], Addr)],
 ) -> Vec<(Field, Range<usize>)> {
     let term_offsets_it = term_offsets
         .iter()
-        .map(|(key, _, _)| Term::wrap(key).field())
+        .map(|(field, _, _, _)| *field)
         .enumerate();
     let mut prev_field_opt = None;
     let mut fields = vec![];
@@ -77,172 +41,122 @@ fn make_field_partition(
     field_offsets
 }
 
-impl MultiFieldPostingsWriter {
-    /// Create a new `MultiFieldPostingsWriter` given
-    /// a schema and a heap.
-    pub fn new(schema: &Schema, table_bits: usize) -> MultiFieldPostingsWriter {
-        let term_index = TermHashMap::new(table_bits);
-        let per_field_postings_writers: Vec<_> = schema
-            .fields()
-            .map(|(_, field_entry)| posting_from_field_entry(field_entry))
-            .collect();
-        MultiFieldPostingsWriter {
-            heap: MemoryArena::new(),
-            schema: schema.clone(),
-            term_index,
-            per_field_postings_writers,
+/// Serialize the inverted index.
+/// It pushes all term, one field at a time, towards the
+/// postings serializer.
+pub(crate) fn serialize_postings(
+    ctx: IndexingContext,
+    schema: Schema,
+    per_field_postings_writers: &PerFieldPostingsWriter,
+    fieldnorm_readers: FieldNormReaders,
+    serializer: &mut InvertedIndexSerializer,
+) -> crate::Result<()> {
+    // Replace unordered ids by ordered ids to be able to sort
+    let unordered_id_to_ordered_id: Vec<OrderedPathId> =
+        ctx.path_to_unordered_id.unordered_id_to_ordered_id();
+
+    let mut term_offsets: Vec<(Field, OrderedPathId, &[u8], Addr)> =
+        Vec::with_capacity(ctx.term_index.len());
+    term_offsets.extend(ctx.term_index.iter().map(|(key, addr)| {
+        let field = Term::wrap(key).field();
+        if schema.get_field_entry(field).field_type().value_type() == Type::Json {
+            let byte_range_path = 5..5 + 4;
+            let unordered_id = u32::from_be_bytes(key[byte_range_path.clone()].try_into().unwrap());
+            let path_id = unordered_id_to_ordered_id[unordered_id as usize];
+            (field, path_id, &key[byte_range_path.end..], addr)
+        } else {
+            (field, 0.into(), &key[5..], addr)
         }
+    }));
+    // Sort by field, path, and term
+    term_offsets.sort_unstable_by(
+        |(field1, path_id1, bytes1, _), (field2, path_id2, bytes2, _)| {
+            (field1, path_id1, bytes1).cmp(&(field2, path_id2, bytes2))
+        },
+    );
+    let ordered_id_to_path = ctx.path_to_unordered_id.ordered_id_to_path();
+    let field_offsets = make_field_partition(&term_offsets);
+    for (field, byte_offsets) in field_offsets {
+        let postings_writer = per_field_postings_writers.get_for_field(field);
+        let fieldnorm_reader = fieldnorm_readers.get_field(field)?;
+        let mut field_serializer =
+            serializer.new_field(field, postings_writer.total_num_tokens(), fieldnorm_reader)?;
+        postings_writer.serialize(
+            &term_offsets[byte_offsets],
+            &ordered_id_to_path,
+            &ctx,
+            &mut field_serializer,
+        )?;
+        field_serializer.close()?;
     }
 
-    pub fn mem_usage(&self) -> usize {
-        self.term_index.mem_usage() + self.heap.mem_usage()
-    }
+    Ok(())
+}
 
-    pub fn index_text(
-        &mut self,
-        doc: DocId,
-        field: Field,
-        token_stream: &mut dyn TokenStream,
-        term_buffer: &mut Term,
-    ) -> u32 {
-        let postings_writer =
-            self.per_field_postings_writers[field.field_id() as usize].deref_mut();
-        postings_writer.index_text(
-            &mut self.term_index,
-            doc,
-            field,
-            token_stream,
-            &mut self.heap,
-            term_buffer,
-        )
-    }
-
-    pub fn subscribe(&mut self, doc: DocId, term: &Term) -> UnorderedTermId {
-        let postings_writer =
-            self.per_field_postings_writers[term.field().field_id() as usize].deref_mut();
-        postings_writer.subscribe(&mut self.term_index, doc, 0u32, term, &mut self.heap)
-    }
-
-    /// Serialize the inverted index.
-    /// It pushes all term, one field at a time, towards the
-    /// postings serializer.
-    pub fn serialize(
-        &self,
-        serializer: &mut InvertedIndexSerializer,
-        fieldnorm_readers: FieldNormReaders,
-        doc_id_map: Option<&DocIdMapping>,
-    ) -> crate::Result<HashMap<Field, FnvHashMap<UnorderedTermId, TermOrdinal>>> {
-        let mut term_offsets: Vec<(&[u8], Addr, UnorderedTermId)> =
-            Vec::with_capacity(self.term_index.len());
-        term_offsets.extend(self.term_index.iter());
-        term_offsets.sort_unstable_by_key(|&(k, _, _)| k);
-
-        let mut unordered_term_mappings: HashMap<Field, FnvHashMap<UnorderedTermId, TermOrdinal>> =
-            HashMap::new();
-
-        let field_offsets = make_field_partition(&term_offsets);
-
-        for (field, byte_offsets) in field_offsets {
-            let field_entry = self.schema.get_field_entry(field);
-
-            match *field_entry.field_type() {
-                FieldType::Str(_) | FieldType::HierarchicalFacet(_) => {
-                    // populating the (unordered term ord) -> (ordered term ord) mapping
-                    // for the field.
-                    let unordered_term_ids = term_offsets[byte_offsets.clone()]
-                        .iter()
-                        .map(|&(_, _, bucket)| bucket);
-                    let mapping: FnvHashMap<UnorderedTermId, TermOrdinal> = unordered_term_ids
-                        .enumerate()
-                        .map(|(term_ord, unord_term_id)| {
-                            (unord_term_id as UnorderedTermId, term_ord as TermOrdinal)
-                        })
-                        .collect();
-                    unordered_term_mappings.insert(field, mapping);
-                }
-                FieldType::U64(_) | FieldType::I64(_) | FieldType::F64(_) | FieldType::Date(_) => {}
-                FieldType::Bytes(_) => {}
-            }
-
-            let postings_writer =
-                self.per_field_postings_writers[field.field_id() as usize].as_ref();
-            let fieldnorm_reader = fieldnorm_readers.get_field(field)?;
-            let mut field_serializer = serializer.new_field(
-                field,
-                postings_writer.total_num_tokens(),
-                fieldnorm_reader,
-            )?;
-            postings_writer.serialize(
-                &term_offsets[byte_offsets],
-                &mut field_serializer,
-                &self.term_index.heap,
-                &self.heap,
-                doc_id_map,
-            )?;
-            field_serializer.close()?;
-        }
-        Ok(unordered_term_mappings)
-    }
+#[derive(Default, Debug)]
+pub(crate) struct IndexingPosition {
+    pub num_tokens: u32,
+    pub end_position: u32,
 }
 
 /// The `PostingsWriter` is in charge of receiving documenting
 /// and building a `Segment` in anonymous memory.
 ///
 /// `PostingsWriter` writes in a `MemoryArena`.
-pub trait PostingsWriter {
+pub(crate) trait PostingsWriter: Send + Sync {
     /// Record that a document contains a term at a given position.
     ///
     /// * doc  - the document id
     /// * pos  - the term position (expressed in tokens)
     /// * term - the term
-    /// * heap - heap used to store the postings informations as well as the terms
-    /// in the hashmap.
-    fn subscribe(
-        &mut self,
-        term_index: &mut TermHashMap,
-        doc: DocId,
-        pos: u32,
-        term: &Term,
-        heap: &mut MemoryArena,
-    ) -> UnorderedTermId;
+    /// * ctx - Contains a term hashmap and a memory arena to store all necessary posting list
+    ///   information.
+    fn subscribe(&mut self, doc: DocId, pos: u32, term: &Term, ctx: &mut IndexingContext);
 
     /// Serializes the postings on disk.
     /// The actual serialization format is handled by the `PostingsSerializer`.
     fn serialize(
         &self,
-        term_addrs: &[(&[u8], Addr, UnorderedTermId)],
-        serializer: &mut FieldSerializer<'_>,
-        term_heap: &MemoryArena,
-        heap: &MemoryArena,
-        doc_id_map: Option<&DocIdMapping>,
+        term_addrs: &[(Field, OrderedPathId, &[u8], Addr)],
+        ordered_id_to_path: &[&str],
+        ctx: &IndexingContext,
+        serializer: &mut FieldSerializer,
     ) -> io::Result<()>;
 
     /// Tokenize a text and subscribe all of its token.
     fn index_text(
         &mut self,
-        term_index: &mut TermHashMap,
         doc_id: DocId,
-        field: Field,
         token_stream: &mut dyn TokenStream,
-        heap: &mut MemoryArena,
         term_buffer: &mut Term,
-    ) -> u32 {
-        term_buffer.set_field(field);
-        let mut sink = |token: &Token| {
+        ctx: &mut IndexingContext,
+        indexing_position: &mut IndexingPosition,
+    ) {
+        let end_of_path_idx = term_buffer.len_bytes();
+        let mut num_tokens = 0;
+        let mut end_position = indexing_position.end_position;
+        token_stream.process(&mut |token: &Token| {
             // We skip all tokens with a len greater than u16.
-            if token.text.len() <= MAX_TOKEN_LEN {
-                term_buffer.set_text(token.text.as_str());
-                self.subscribe(term_index, doc_id, token.position as u32, term_buffer, heap);
-            } else {
+            if token.text.len() > MAX_TOKEN_LEN {
                 warn!(
                     "A token exceeding MAX_TOKEN_LEN ({}>{}) was dropped. Search for \
                      MAX_TOKEN_LEN in the documentation for more information.",
                     token.text.len(),
                     MAX_TOKEN_LEN
                 );
+                return;
             }
-        };
-        token_stream.process(&mut sink)
+            term_buffer.truncate_value_bytes(end_of_path_idx);
+            term_buffer.append_bytes(token.text.as_bytes());
+            let start_position = indexing_position.end_position + token.position as u32;
+            end_position = end_position.max(start_position + token.position_length as u32);
+            self.subscribe(doc_id, start_position, term_buffer, ctx);
+            num_tokens += 1;
+        });
+
+        indexing_position.end_position = end_position + POSITION_GAP;
+        indexing_position.num_tokens += num_tokens;
+        term_buffer.truncate_value_bytes(end_of_path_idx);
     }
 
     fn total_num_tokens(&self) -> u64;
@@ -250,70 +164,72 @@ pub trait PostingsWriter {
 
 /// The `SpecializedPostingsWriter` is just here to remove dynamic
 /// dispatch to the recorder information.
-pub(crate) struct SpecializedPostingsWriter<Rec: Recorder + 'static> {
+#[derive(Default)]
+pub(crate) struct SpecializedPostingsWriter<Rec: Recorder> {
     total_num_tokens: u64,
     _recorder_type: PhantomData<Rec>,
 }
 
-impl<Rec: Recorder + 'static> SpecializedPostingsWriter<Rec> {
-    /// constructor
-    pub fn new() -> SpecializedPostingsWriter<Rec> {
-        SpecializedPostingsWriter {
-            total_num_tokens: 0u64,
-            _recorder_type: PhantomData,
-        }
-    }
-
-    /// Builds a `SpecializedPostingsWriter` storing its data in a heap.
-    pub fn new_boxed() -> Box<dyn PostingsWriter> {
-        Box::new(SpecializedPostingsWriter::<Rec>::new())
+impl<Rec: Recorder> From<SpecializedPostingsWriter<Rec>> for Box<dyn PostingsWriter> {
+    fn from(
+        specialized_postings_writer: SpecializedPostingsWriter<Rec>,
+    ) -> Box<dyn PostingsWriter> {
+        Box::new(specialized_postings_writer)
     }
 }
 
-impl<Rec: Recorder + 'static> PostingsWriter for SpecializedPostingsWriter<Rec> {
-    fn subscribe(
-        &mut self,
-        term_index: &mut TermHashMap,
-        doc: DocId,
-        position: u32,
-        term: &Term,
-        heap: &mut MemoryArena,
-    ) -> UnorderedTermId {
-        debug_assert!(term.as_slice().len() >= 4);
+impl<Rec: Recorder> SpecializedPostingsWriter<Rec> {
+    #[inline]
+    pub(crate) fn serialize_one_term(
+        term: &[u8],
+        addr: Addr,
+        buffer_lender: &mut BufferLender,
+        ctx: &IndexingContext,
+        serializer: &mut FieldSerializer,
+    ) -> io::Result<()> {
+        let recorder: Rec = ctx.term_index.read(addr);
+        let term_doc_freq = recorder.term_doc_freq().unwrap_or(0u32);
+        serializer.new_term(term, term_doc_freq, recorder.has_term_freq())?;
+        recorder.serialize(&ctx.arena, serializer, buffer_lender);
+        serializer.close_term()?;
+        Ok(())
+    }
+}
+
+impl<Rec: Recorder> PostingsWriter for SpecializedPostingsWriter<Rec> {
+    #[inline]
+    fn subscribe(&mut self, doc: DocId, position: u32, term: &Term, ctx: &mut IndexingContext) {
+        debug_assert!(term.serialized_term().len() >= 4);
         self.total_num_tokens += 1;
-        term_index.mutate_or_create(term, |opt_recorder: Option<Rec>| {
+        let (term_index, arena) = (&mut ctx.term_index, &mut ctx.arena);
+        term_index.mutate_or_create(term.serialized_term(), |opt_recorder: Option<Rec>| {
             if let Some(mut recorder) = opt_recorder {
                 let current_doc = recorder.current_doc();
                 if current_doc != doc {
-                    recorder.close_doc(heap);
-                    recorder.new_doc(doc, heap);
+                    recorder.close_doc(arena);
+                    recorder.new_doc(doc, arena);
                 }
-                recorder.record_position(position, heap);
+                recorder.record_position(position, arena);
                 recorder
             } else {
-                let mut recorder = Rec::new();
-                recorder.new_doc(doc, heap);
-                recorder.record_position(position, heap);
+                let mut recorder = Rec::default();
+                recorder.new_doc(doc, arena);
+                recorder.record_position(position, arena);
                 recorder
             }
-        }) as UnorderedTermId
+        });
     }
 
     fn serialize(
         &self,
-        term_addrs: &[(&[u8], Addr, UnorderedTermId)],
-        serializer: &mut FieldSerializer<'_>,
-        termdict_heap: &MemoryArena,
-        heap: &MemoryArena,
-        doc_id_map: Option<&DocIdMapping>,
+        term_addrs: &[(Field, OrderedPathId, &[u8], Addr)],
+        _ordered_id_to_path: &[&str],
+        ctx: &IndexingContext,
+        serializer: &mut FieldSerializer,
     ) -> io::Result<()> {
         let mut buffer_lender = BufferLender::default();
-        for &(term_bytes, addr, _) in term_addrs {
-            let recorder: Rec = termdict_heap.read(addr);
-            let term_doc_freq = recorder.term_doc_freq().unwrap_or(0u32);
-            serializer.new_term(&term_bytes[4..], term_doc_freq)?;
-            recorder.serialize(&mut buffer_lender, serializer, heap, doc_id_map);
-            serializer.close_term()?;
+        for (_field, _path_id, term, addr) in term_addrs {
+            Self::serialize_one_term(term, *addr, &mut buffer_lender, ctx, serializer)?;
         }
         Ok(())
     }

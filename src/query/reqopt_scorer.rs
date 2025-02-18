@@ -1,9 +1,9 @@
+use std::marker::PhantomData;
+
 use crate::docset::DocSet;
 use crate::query::score_combiner::ScoreCombiner;
 use crate::query::Scorer;
-use crate::DocId;
-use crate::Score;
-use std::marker::PhantomData;
+use crate::{DocId, Score};
 
 /// Given a required scorer and an optional scorer
 /// matches all document from the required scorer
@@ -51,6 +51,11 @@ where
         self.req_scorer.advance()
     }
 
+    fn seek(&mut self, target: DocId) -> DocId {
+        self.score_cache = None;
+        self.req_scorer.seek(target)
+    }
+
     fn doc(&self) -> DocId {
         self.req_scorer.doc()
     }
@@ -89,9 +94,7 @@ mod tests {
     use crate::docset::{DocSet, TERMINATED};
     use crate::postings::tests::test_skip_against_unoptimized;
     use crate::query::score_combiner::{DoNothingCombiner, SumCombiner};
-    use crate::query::ConstScorer;
-    use crate::query::Scorer;
-    use crate::query::VecDocSet;
+    use crate::query::{ConstScorer, Scorer, VecDocSet};
     use crate::tests::sample_with_seed;
 
     #[test]
@@ -173,5 +176,24 @@ mod tests {
             },
             skip_docs,
         );
+    }
+
+    #[test]
+    fn test_reqopt_scorer_seek() {
+        let mut reqoptscorer: RequiredOptionalScorer<_, _, SumCombiner> =
+            RequiredOptionalScorer::new(
+                ConstScorer::new(VecDocSet::from(vec![1, 3, 7, 8, 9, 10, 13, 15]), 1.0),
+                ConstScorer::new(VecDocSet::from(vec![2, 7, 11, 12, 15]), 1.0),
+            );
+        {
+            assert_eq!(reqoptscorer.score(), 1.0);
+            assert_eq!(reqoptscorer.seek(7), 7);
+            assert_eq!(reqoptscorer.score(), 2.0);
+        }
+        {
+            assert_eq!(reqoptscorer.score(), 2.0);
+            assert_eq!(reqoptscorer.seek(12), 13);
+            assert_eq!(reqoptscorer.score(), 1.0);
+        }
     }
 }

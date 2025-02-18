@@ -1,14 +1,13 @@
+use common::HasLen;
+
 use crate::docset::DocSet;
 use crate::fastfield::AliveBitSet;
 use crate::positions::PositionReader;
-use crate::postings::branchless_binary_search;
 use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
-use crate::postings::BlockSegmentPostings;
-use crate::postings::Postings;
+use crate::postings::{branchless_binary_search, BlockSegmentPostings, Postings};
 use crate::{DocId, TERMINATED};
-use common::HasLen;
 
-/// `SegmentPostings` represents the inverted list or postings associated to
+/// `SegmentPostings` represents the inverted list or postings associated with
 /// a term in a `Segment`.
 ///
 /// As we iterate through the `SegmentPostings`, the frequencies are optionally decoded.
@@ -72,7 +71,7 @@ impl SegmentPostings {
         {
             let mut postings_serializer =
                 PostingsSerializer::new(&mut buffer, 0.0, IndexRecordOption::Basic, None);
-            postings_serializer.new_term(docs.len() as u32);
+            postings_serializer.new_term(docs.len() as u32, false);
             for &doc in docs {
                 postings_serializer.write_doc(doc, 1u32);
             }
@@ -121,7 +120,7 @@ impl SegmentPostings {
             IndexRecordOption::WithFreqs,
             fieldnorm_reader,
         );
-        postings_serializer.new_term(doc_and_tfs.len() as u32);
+        postings_serializer.new_term(doc_and_tfs.len() as u32, true);
         for &(doc, tf) in doc_and_tfs {
             postings_serializer.write_doc(doc, tf);
         }
@@ -142,8 +141,7 @@ impl SegmentPostings {
     ///
     /// * `len` - number of document in the posting lists.
     /// * `data` - data array. The complete data is not necessarily used.
-    /// * `freq_handler` - the freq handler is in charge of decoding
-    ///   frequencies and/or positions
+    /// * `freq_handler` - the freq handler is in charge of decoding frequencies and/or positions
     pub(crate) fn from_block_postings(
         segment_block_postings: BlockSegmentPostings,
         position_reader: Option<PositionReader>,
@@ -218,7 +216,7 @@ impl HasLen for SegmentPostings {
 }
 
 impl Postings for SegmentPostings {
-    /// Returns the frequency associated to the current document.
+    /// Returns the frequency associated with the current document.
     /// If the schema is set up so that no frequency have been encoded,
     /// this method should always return 1.
     ///
@@ -234,29 +232,32 @@ impl Postings for SegmentPostings {
             // In that case we hit the block just as if the frequency had been
             // decoded. The block is simply prefilled by the value 1.
             self.cur < COMPRESSION_BLOCK_SIZE,
-            "Have you forgotten to call `.advance()` at least once before calling \
-             `.term_freq()`."
+            "Have you forgotten to call `.advance()` at least once before calling `.term_freq()`."
         );
         self.block_cursor.freq(self.cur)
     }
 
-    fn positions_with_offset(&mut self, offset: u32, output: &mut Vec<u32>) {
-        let term_freq = self.term_freq() as usize;
+    fn append_positions_with_offset(&mut self, offset: u32, output: &mut Vec<u32>) {
+        let term_freq = self.term_freq();
+        let prev_len = output.len();
         if let Some(position_reader) = self.position_reader.as_mut() {
+            debug_assert!(
+                !self.block_cursor.freqs().is_empty(),
+                "No positions available"
+            );
             let read_offset = self.block_cursor.position_offset()
                 + (self.block_cursor.freqs()[..self.cur]
                     .iter()
                     .cloned()
                     .sum::<u32>() as u64);
-            output.resize(term_freq, 0u32);
-            position_reader.read(read_offset, &mut output[..]);
+            // TODO: instead of zeroing the output, we could use MaybeUninit or similar.
+            output.resize(prev_len + term_freq as usize, 0u32);
+            position_reader.read(read_offset, &mut output[prev_len..]);
             let mut cum = offset;
-            for output_mut in output.iter_mut() {
+            for output_mut in output[prev_len..].iter_mut() {
                 cum += *output_mut;
                 *output_mut = cum;
             }
-        } else {
-            output.clear();
         }
     }
 }
@@ -264,9 +265,9 @@ impl Postings for SegmentPostings {
 #[cfg(test)]
 mod tests {
 
-    use super::SegmentPostings;
     use common::HasLen;
 
+    use super::SegmentPostings;
     use crate::docset::{DocSet, TERMINATED};
     use crate::fastfield::AliveBitSet;
     use crate::postings::postings::Postings;

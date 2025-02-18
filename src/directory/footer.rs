@@ -1,14 +1,13 @@
-use crate::directory::error::Incompatibility;
-use crate::directory::FileSlice;
-use crate::{
-    directory::{AntiCallToken, TerminatingWrite},
-    Version, INDEX_FORMAT_VERSION,
-};
+use std::io;
+use std::io::Write;
+
 use common::{BinarySerializable, CountingWriter, DeserializeFrom, FixedSize, HasLen};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use std::io;
-use std::io::Write;
+
+use crate::directory::error::Incompatibility;
+use crate::directory::{AntiCallToken, FileSlice, TerminatingWrite};
+use crate::{Version, INDEX_FORMAT_OLDEST_SUPPORTED_VERSION, INDEX_FORMAT_VERSION};
 
 const FOOTER_MAX_LEN: u32 = 50_000;
 
@@ -39,7 +38,7 @@ impl Footer {
         counting_write.write_all(serde_json::to_string(&self)?.as_ref())?;
         let footer_payload_len = counting_write.written_bytes();
         BinarySerializable::serialize(&(footer_payload_len as u32), write)?;
-        BinarySerializable::serialize(&(FOOTER_MAGIC_NUMBER as u32), write)?;
+        BinarySerializable::serialize(&FOOTER_MAGIC_NUMBER, write)?;
         Ok(())
     }
 
@@ -64,7 +63,9 @@ impl Footer {
         if footer_magic_byte != FOOTER_MAGIC_NUMBER {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                    "Footer magic byte mismatch. File corrupted or index was created using old an tantivy version which is not supported anymore. Please use tantivy 0.15 or above to recreate the index.",
+                "Footer magic byte mismatch. File corrupted or index was created using old an \
+                 tantivy version which is not supported anymore. Please use tantivy 0.15 or above \
+                 to recreate the index.",
             ));
         }
 
@@ -72,9 +73,9 @@ impl Footer {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Footer seems invalid as it suggests a footer len of {}. File is corrupted, \
-            or the index was created with a different & old version of tantivy.",
-                    footer_len
+                    "Footer seems invalid as it suggests a footer len of {footer_len}. File is \
+                     corrupted, or the index was created with a different & old version of \
+                     tantivy."
                 ),
             ));
         }
@@ -83,15 +84,16 @@ impl Footer {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
-                    "File corrupted. The file is smaller than it's footer bytes (len={}).",
-                    total_footer_size
+                    "File corrupted. The file is smaller than it's footer bytes \
+                     (len={total_footer_size})."
                 ),
             ));
         }
 
-        let footer: Footer = serde_json::from_slice(&file.read_bytes_slice(
-            file.len() - total_footer_size..file.len() - footer_metadata_len as usize,
-        )?)?;
+        let footer: Footer =
+            serde_json::from_slice(&file.read_bytes_slice(
+                file.len() - total_footer_size..file.len() - footer_metadata_len,
+            )?)?;
 
         let body = file.slice_to(file.len() - total_footer_size);
         Ok((footer, body))
@@ -100,10 +102,11 @@ impl Footer {
     /// Confirms that the index will be read correctly by this version of tantivy
     /// Has to be called after `extract_footer` to make sure it's not accessing uninitialised memory
     pub fn is_compatible(&self) -> Result<(), Incompatibility> {
+        const SUPPORTED_INDEX_FORMAT_VERSION_RANGE: std::ops::RangeInclusive<u32> =
+            INDEX_FORMAT_OLDEST_SUPPORTED_VERSION..=INDEX_FORMAT_VERSION;
+
         let library_version = crate::version();
-        if self.version.index_format_version < 4
-            || self.version.index_format_version > INDEX_FORMAT_VERSION
-        {
+        if !SUPPORTED_INDEX_FORMAT_VERSION_RANGE.contains(&self.version.index_format_version) {
             return Err(Incompatibility::IndexMismatch {
                 library_version: library_version.clone(),
                 index_version: self.version.clone(),
@@ -154,11 +157,13 @@ impl<W: TerminatingWrite> TerminatingWrite for FooterProxy<W> {
 #[cfg(test)]
 mod tests {
 
-    use crate::directory::footer::Footer;
-    use crate::directory::OwnedBytes;
-    use crate::directory::{footer::FOOTER_MAGIC_NUMBER, FileSlice};
-    use common::BinarySerializable;
     use std::io;
+    use std::sync::Arc;
+
+    use common::BinarySerializable;
+
+    use crate::directory::footer::{Footer, FOOTER_MAGIC_NUMBER};
+    use crate::directory::{FileSlice, OwnedBytes};
 
     #[test]
     fn test_deserialize_footer() {
@@ -166,7 +171,7 @@ mod tests {
         let footer = Footer::new(123);
         footer.append_footer(&mut buf).unwrap();
         let owned_bytes = OwnedBytes::new(buf);
-        let fileslice = FileSlice::new(Box::new(owned_bytes));
+        let fileslice = FileSlice::new(Arc::new(owned_bytes));
         let (footer_deser, _body) = Footer::extract_footer(fileslice).unwrap();
         assert_eq!(footer_deser.crc(), footer.crc());
     }
@@ -179,12 +184,13 @@ mod tests {
 
         let owned_bytes = OwnedBytes::new(buf);
 
-        let fileslice = FileSlice::new(Box::new(owned_bytes));
+        let fileslice = FileSlice::new(Arc::new(owned_bytes));
         let err = Footer::extract_footer(fileslice).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Footer magic byte mismatch. File corrupted or index was created using old an tantivy version which \
-            is not supported anymore. Please use tantivy 0.15 or above to recreate the index."
+            "Footer magic byte mismatch. File corrupted or index was created using old an tantivy \
+             version which is not supported anymore. Please use tantivy 0.15 or above to recreate \
+             the index."
         );
     }
     #[test]
@@ -195,7 +201,7 @@ mod tests {
 
         let owned_bytes = OwnedBytes::new(buf);
 
-        let fileslice = FileSlice::new(Box::new(owned_bytes));
+        let fileslice = FileSlice::new(Arc::new(owned_bytes));
         let err = Footer::extract_footer(fileslice).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         assert_eq!(
@@ -214,13 +220,13 @@ mod tests {
 
         let owned_bytes = OwnedBytes::new(buf);
 
-        let fileslice = FileSlice::new(Box::new(owned_bytes));
+        let fileslice = FileSlice::new(Arc::new(owned_bytes));
         let err = Footer::extract_footer(fileslice).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
             err.to_string(),
-            "Footer seems invalid as it suggests a footer len of 50001. File is corrupted, \
-    or the index was created with a different & old version of tantivy."
+            "Footer seems invalid as it suggests a footer len of 50001. File is corrupted, or the \
+             index was created with a different & old version of tantivy."
         );
     }
 }

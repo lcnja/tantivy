@@ -4,18 +4,15 @@ mod term_weight;
 
 pub use self::term_query::TermQuery;
 pub use self::term_scorer::TermScorer;
-pub use self::term_weight::TermWeight;
-
 #[cfg(test)]
 mod tests {
 
     use crate::collector::TopDocs;
     use crate::docset::DocSet;
     use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
-    use crate::query::{Query, QueryParser, Scorer, TermQuery};
+    use crate::query::{EnableScoring, Query, QueryParser, Scorer, TermQuery};
     use crate::schema::{Field, IndexRecordOption, Schema, STRING, TEXT};
-    use crate::{assert_nearly_equals, DocAddress};
-    use crate::{Index, Term, TERMINATED};
+    use crate::{assert_nearly_equals, DocAddress, Index, IndexWriter, Term, TERMINATED};
 
     #[test]
     pub fn test_term_query_no_freq() -> crate::Result<()> {
@@ -25,7 +22,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             // writing the segment
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             let doc = doc!(text_field => "a");
             index_writer.add_document(doc)?;
             index_writer.commit()?;
@@ -35,7 +32,7 @@ mod tests {
             Term::from_field_text(text_field, "a"),
             IndexRecordOption::Basic,
         );
-        let term_weight = term_query.weight(&searcher, true)?;
+        let term_weight = term_query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
         let segment_reader = searcher.segment_reader(0);
         let mut term_scorer = term_weight.scorer(segment_reader, 1.0)?;
         assert_eq!(term_scorer.doc(), 0);
@@ -51,7 +48,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             // writing the segment
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             for _ in 0..COMPRESSION_BLOCK_SIZE {
                 let doc = doc!(text_field => "a");
                 index_writer.add_document(doc)?;
@@ -63,7 +60,7 @@ mod tests {
             Term::from_field_text(text_field, "a"),
             IndexRecordOption::Basic,
         );
-        let term_weight = term_query.weight(&searcher, true)?;
+        let term_weight = term_query.weight(EnableScoring::enabled_from_searcher(&searcher))?;
         let segment_reader = searcher.segment_reader(0);
         let mut term_scorer = term_weight.scorer(segment_reader, 1.0)?;
         for i in 0u32..COMPRESSION_BLOCK_SIZE as u32 {
@@ -87,7 +84,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_for_tests()?;
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(
                 left_field => "left1 left2 left2 left2f2 left2f2 left3 abcde abcde abcde abcde abcde abcde abcde abcde abcde abcewde abcde abcde",
                 right_field => "right1 right2",
@@ -134,7 +131,7 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests()?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.add_document(doc!(text_field=>"a b"))?;
         index_writer.add_document(doc!(text_field=>"a c"))?;
         index_writer.delete_term(Term::from_field_text(text_field, "b"));
@@ -142,7 +139,7 @@ mod tests {
         let term_a = Term::from_field_text(text_field, "a");
         let term_query = TermQuery::new(term_a, IndexRecordOption::Basic);
         let reader = index.reader()?;
-        assert_eq!(term_query.count(&*reader.searcher())?, 1);
+        assert_eq!(term_query.count(&reader.searcher())?, 1);
         Ok(())
     }
 
@@ -152,14 +149,15 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests()?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.add_document(doc!(text_field=>"a"))?;
         index_writer.add_document(doc!(text_field=>"a"))?;
         index_writer.commit()?;
         let term_a = Term::from_field_text(text_field, "a");
         let term_query = TermQuery::new(term_a, IndexRecordOption::Basic);
         let searcher = index.reader()?.searcher();
-        let term_weight = term_query.weight(&searcher, false)?;
+        let term_weight =
+            term_query.weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
         let mut term_scorer = term_weight.scorer(searcher.segment_reader(0u32), 1.0)?;
         assert_eq!(term_scorer.doc(), 0u32);
         term_scorer.seek(1u32);
@@ -174,8 +172,8 @@ mod tests {
             IndexRecordOption::WithFreqs,
         );
         assert_eq!(
-            format!("{:?}", term_query),
-            "TermQuery(Term(field=1,bytes=[104, 101, 108, 108, 111]))"
+            format!("{term_query:?}"),
+            r#"TermQuery(Term(field=1, type=Str, "hello"))"#
         );
     }
 
@@ -185,7 +183,7 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_for_tests()?;
+        let mut index_writer: IndexWriter = index.writer_for_tests()?;
         index_writer.add_document(doc!(text_field=>"b"))?;
         index_writer.add_document(doc!(text_field=>"a"))?;
         index_writer.add_document(doc!(text_field=>"a"))?;
@@ -196,7 +194,7 @@ mod tests {
         let searcher = index.reader()?.searcher();
         {
             let explanation = term_query.explain(&searcher, DocAddress::new(0u32, 1u32))?;
-            assert_nearly_equals!(explanation.value(), 0.6931472);
+            assert_nearly_equals!(explanation.value(), std::f32::consts::LN_2);
         }
         {
             let explanation_err = term_query.explain(&searcher, DocAddress::new(0u32, 0u32));

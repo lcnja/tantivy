@@ -1,12 +1,13 @@
+use std::cmp;
+use std::io::{self, Read, Write};
+
+use byteorder::{ByteOrder, LittleEndian};
+use common::{BinarySerializable, FixedSize};
+use tantivy_bitpacker::{compute_num_bits, BitPacker};
+
 use crate::directory::{FileSlice, OwnedBytes};
 use crate::postings::TermInfo;
 use crate::termdict::TermOrdinal;
-use byteorder::{ByteOrder, LittleEndian};
-use common::{BinarySerializable, FixedSize};
-use std::cmp;
-use std::io::{self, Read, Write};
-use tantivy_bitpacker::compute_num_bits;
-use tantivy_bitpacker::BitPacker;
 
 const BLOCK_LEN: usize = 256;
 
@@ -20,7 +21,7 @@ struct TermInfoBlockMeta {
 }
 
 impl BinarySerializable for TermInfoBlockMeta {
-    fn serialize<W: Write>(&self, write: &mut W) -> io::Result<()> {
+    fn serialize<W: Write + ?Sized>(&self, write: &mut W) -> io::Result<()> {
         self.offset.serialize(write)?;
         self.ref_term_info.serialize(write)?;
         write.write_all(&[
@@ -68,7 +69,7 @@ impl TermInfoBlockMeta {
         let posting_end_addr = posting_start_addr + num_bits;
         let positions_start_addr = posting_start_addr + self.postings_offset_nbits as usize;
         // the position_end is the positions_start of the next term info.
-        let positions_end_addr = positions_start_addr + num_bits as usize;
+        let positions_end_addr = positions_start_addr + num_bits;
 
         let doc_freq_addr = positions_start_addr + self.positions_offset_nbits as usize;
 
@@ -92,6 +93,7 @@ impl TermInfoBlockMeta {
     }
 }
 
+#[derive(Clone)]
 pub struct TermInfoStore {
     num_terms: usize,
     block_meta_bytes: OwnedBytes,
@@ -120,7 +122,7 @@ fn extract_bits(data: &[u8], addr_bits: usize, num_bits: u8) -> u64 {
 }
 
 impl TermInfoStore {
-    pub fn open(term_info_store_file: FileSlice) -> crate::Result<TermInfoStore> {
+    pub fn open(term_info_store_file: FileSlice) -> io::Result<TermInfoStore> {
         let (len_slice, main_slice) = term_info_store_file.split(16);
         let mut bytes = len_slice.read_bytes()?;
         let len = u64::deserialize(&mut bytes)? as usize;
@@ -234,12 +236,12 @@ impl TermInfoStoreWriter {
         };
 
         term_info_block_meta.serialize(&mut self.buffer_block_metas)?;
-        for term_info in self.term_infos[1..].iter().cloned() {
+        for term_info in &self.term_infos[1..] {
             bitpack_serialize(
                 &mut self.buffer_term_infos,
                 &mut bit_packer,
                 &term_info_block_meta,
-                &term_info,
+                term_info,
             )?;
         }
 
@@ -271,7 +273,7 @@ impl TermInfoStoreWriter {
         Ok(())
     }
 
-    pub fn serialize<W: io::Write>(&mut self, write: &mut W) -> io::Result<()> {
+    pub fn serialize<W: io::Write + ?Sized>(&mut self, write: &mut W) -> io::Result<()> {
         if !self.term_infos.is_empty() {
             self.flush_block()?;
         }
@@ -287,15 +289,12 @@ impl TermInfoStoreWriter {
 #[cfg(test)]
 mod tests {
 
-    use super::extract_bits;
-    use super::TermInfoBlockMeta;
-    use super::{TermInfoStore, TermInfoStoreWriter};
+    use common::BinarySerializable;
+    use tantivy_bitpacker::{compute_num_bits, BitPacker};
+
+    use super::{extract_bits, TermInfoBlockMeta, TermInfoStore, TermInfoStoreWriter};
     use crate::directory::FileSlice;
     use crate::postings::TermInfo;
-    use common;
-    use common::BinarySerializable;
-    use tantivy_bitpacker::compute_num_bits;
-    use tantivy_bitpacker::BitPacker;
 
     #[test]
     fn test_term_info_block() {
@@ -313,7 +312,7 @@ mod tests {
         bitpack.write(51, 6, &mut buffer).unwrap();
         assert_eq!(compute_num_bits(51), 6);
         bitpack.close(&mut buffer).unwrap();
-        assert_eq!(buffer.len(), 3 + 7);
+        assert_eq!(buffer.len(), 3);
         assert_eq!(extract_bits(&buffer[..], 0, 9), 321u64);
         assert_eq!(extract_bits(&buffer[..], 9, 2), 2u64);
         assert_eq!(extract_bits(&buffer[..], 11, 6), 51u64);
@@ -360,8 +359,7 @@ mod tests {
             assert_eq!(
                 term_info_store.get(i as u64),
                 term_infos[i],
-                "term info {}",
-                i
+                "term info {i}"
             );
         }
         Ok(())

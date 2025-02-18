@@ -1,5 +1,4 @@
-use crate::DocId;
-use crate::Opstamp;
+use crate::{DocId, Opstamp};
 
 // Doc to opstamp is used to identify which
 // document should be deleted.
@@ -22,7 +21,7 @@ pub enum DocToOpstampMapping<'a> {
     None,
 }
 
-impl<'a> DocToOpstampMapping<'a> {
+impl DocToOpstampMapping<'_> {
     /// Assess whether a document should be considered deleted given that it contains
     /// a deleted term that was deleted at the opstamp: `delete_opstamp`.
     ///

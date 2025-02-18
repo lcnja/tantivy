@@ -1,12 +1,9 @@
 use crate::docset::DocSet;
-use crate::query::{Explanation, Scorer};
-use crate::DocId;
-use crate::Score;
-
 use crate::fieldnorm::FieldNormReader;
-use crate::postings::SegmentPostings;
-use crate::postings::{FreqReadingOption, Postings};
+use crate::postings::{FreqReadingOption, Postings, SegmentPostings};
 use crate::query::bm25::Bm25Weight;
+use crate::query::{Explanation, Scorer};
+use crate::{DocId, Score};
 
 #[derive(Clone)]
 pub struct TermScorer {
@@ -96,7 +93,7 @@ impl TermScorer {
     }
 
     pub fn last_doc_in_block(&self) -> DocId {
-        self.postings.block_cursor.skip_reader.last_doc_in_block()
+        self.postings.block_cursor.skip_reader().last_doc_in_block()
     }
 }
 
@@ -128,16 +125,18 @@ impl Scorer for TermScorer {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    use crate::index::SegmentId;
+    use crate::indexer::index_writer::MEMORY_BUDGET_NUM_BYTES_MIN;
     use crate::merge_policy::NoMergePolicy;
     use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
     use crate::query::term_query::TermScorer;
-    use crate::query::{Bm25Weight, Scorer, TermQuery};
+    use crate::query::{Bm25Weight, EnableScoring, Scorer, TermQuery};
     use crate::schema::{IndexRecordOption, Schema, TEXT};
-    use crate::Score;
-    use crate::{assert_nearly_equals, Index, Searcher, SegmentId, Term};
-    use crate::{DocId, DocSet, TERMINATED};
-    use futures::executor::block_on;
-    use proptest::prelude::*;
+    use crate::{
+        assert_nearly_equals, DocId, DocSet, Index, IndexWriter, Score, Searcher, Term, TERMINATED,
+    };
 
     #[test]
     fn test_term_scorer_max_score() -> crate::Result<()> {
@@ -253,7 +252,8 @@ mod tests {
     }
 
     fn test_block_wand_aux(term_query: &TermQuery, searcher: &Searcher) -> crate::Result<()> {
-        let term_weight = term_query.specialized_weight(searcher, true)?;
+        let term_weight =
+            term_query.specialized_weight(EnableScoring::enabled_from_searcher(searcher))?;
         for reader in searcher.segment_readers() {
             let mut block_max_scores = vec![];
             let mut block_max_scores_b = vec![];
@@ -297,7 +297,8 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut writer = index.writer_with_num_threads(3, 30_000_000)?;
+        let mut writer: IndexWriter =
+            index.writer_with_num_threads(3, 3 * MEMORY_BUDGET_NUM_BYTES_MIN)?;
         use rand::Rng;
         let mut rng = rand::thread_rng();
         writer.set_merge_policy(Box::new(NoMergePolicy));
@@ -323,9 +324,7 @@ mod tests {
                 .collect();
             test_block_wand_aux(&term_query, &searcher)?;
         }
-        {
-            let _ = block_on(writer.merge(&segment_ids[..]));
-        }
+        writer.merge(&segment_ids[..]).wait().unwrap();
         {
             reader.reload()?;
             let searcher = reader.searcher();

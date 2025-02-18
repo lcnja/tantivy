@@ -11,7 +11,7 @@
 use tantivy::collector::TopDocs;
 use tantivy::query::TermQuery;
 use tantivy::schema::*;
-use tantivy::{doc, Index, IndexReader};
+use tantivy::{doc, Index, IndexReader, IndexWriter};
 
 // A simple helper function to fetch a single document
 // given its id from our index.
@@ -19,7 +19,7 @@ use tantivy::{doc, Index, IndexReader};
 fn extract_doc_given_isbn(
     reader: &IndexReader,
     isbn_term: &Term,
-) -> tantivy::Result<Option<Document>> {
+) -> tantivy::Result<Option<TantivyDocument>> {
     let searcher = reader.searcher();
 
     // This is the simplest query you can think of.
@@ -56,8 +56,9 @@ fn main() -> tantivy::Result<()> {
     // If it is `text`, let's make sure to keep it `raw` and let's avoid
     // running any text processing on it.
     // This is done by associating this field to the tokenizer named `raw`.
-    // Rather than building our [`TextOptions`](//docs.rs/tantivy/~0/tantivy/schema/struct.TextOptions.html) manually,
-    // We use the `STRING` shortcut. `STRING` stands for indexed (without term frequency or positions)
+    // Rather than building our
+    // [`TextOptions`](//docs.rs/tantivy/~0/tantivy/schema/struct.TextOptions.html) manually, We
+    // use the `STRING` shortcut. `STRING` stands for indexed (without term frequency or positions)
     // and untokenized.
     //
     // Because we also want to be able to see this `id` in our returned documents,
@@ -68,10 +69,10 @@ fn main() -> tantivy::Result<()> {
 
     let index = Index::create_in_ram(schema.clone());
 
-    let mut index_writer = index.writer(50_000_000)?;
+    let mut index_writer: IndexWriter = index.writer(50_000_000)?;
 
     // Let's add a couple of documents, for the sake of the example.
-    let mut old_man_doc = Document::default();
+    let mut old_man_doc = TantivyDocument::default();
     old_man_doc.add_text(title, "The Old Man and the Sea");
     index_writer.add_document(doc!(
         isbn => "978-0099908401",
@@ -93,7 +94,7 @@ fn main() -> tantivy::Result<()> {
     // Oops our frankenstein doc seems misspelled
     let frankenstein_doc_misspelled = extract_doc_given_isbn(&reader, &frankenstein_isbn)?.unwrap();
     assert_eq!(
-        schema.to_json(&frankenstein_doc_misspelled),
+        frankenstein_doc_misspelled.to_json(&schema),
         r#"{"isbn":["978-9176370711"],"title":["Frankentein"]}"#,
     );
 
@@ -112,7 +113,7 @@ fn main() -> tantivy::Result<()> {
     // on its id.
     //
     // Note that `tantivy` does nothing to enforce the idea that
-    // there is only one document associated to this id.
+    // there is only one document associated with this id.
     //
     // Also you might have noticed that we apply the delete before
     // having committed. This does not matter really...
@@ -135,7 +136,7 @@ fn main() -> tantivy::Result<()> {
     // No more typo!
     let frankenstein_new_doc = extract_doc_given_isbn(&reader, &frankenstein_isbn)?.unwrap();
     assert_eq!(
-        schema.to_json(&frankenstein_new_doc),
+        frankenstein_new_doc.to_json(&schema),
         r#"{"isbn":["978-9176370711"],"title":["Frankenstein"]}"#,
     );
 

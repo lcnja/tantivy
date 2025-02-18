@@ -1,6 +1,7 @@
+use common::{BitSet, TinySet};
+
 use crate::docset::{DocSet, TERMINATED};
 use crate::DocId;
-use common::{BitSet, TinySet};
 
 /// A `BitSetDocSet` makes it possible to iterate through a bitset as if it was a `DocSet`.
 ///
@@ -13,7 +14,7 @@ use common::{BitSet, TinySet};
 /// when the bitset is sparse
 pub struct BitSetDocSet {
     docs: BitSet,
-    cursor_bucket: u32, //< index associated to the current tiny bitset
+    cursor_bucket: u32, //< index associated with the current tiny bitset
     cursor_tinybitset: TinySet,
     doc: u32,
 }
@@ -44,9 +45,10 @@ impl From<BitSet> for BitSetDocSet {
 }
 
 impl DocSet for BitSetDocSet {
+    #[inline]
     fn advance(&mut self) -> DocId {
         if let Some(lower) = self.cursor_tinybitset.pop_lowest() {
-            self.doc = (self.cursor_bucket as u32 * 64u32) | lower;
+            self.doc = (self.cursor_bucket * 64u32) | lower;
             return self.doc;
         }
         if let Some(cursor_bucket) = self.docs.first_non_empty_bucket(self.cursor_bucket + 1) {
@@ -85,10 +87,7 @@ impl DocSet for BitSetDocSet {
         self.doc
     }
 
-    /// Returns half of the `max_doc`
-    /// This is quite a terrible heuristic,
-    /// but we don't have access to any better
-    /// value.
+    /// Returns the number of values set in the underlying bitset.
     fn size_hint(&self) -> u32 {
         self.docs.len() as u32
     }
@@ -98,11 +97,12 @@ impl DocSet for BitSetDocSet {
 mod tests {
     use std::collections::BTreeSet;
 
+    use common::BitSet;
+
     use super::BitSetDocSet;
     use crate::docset::{DocSet, TERMINATED};
     use crate::tests::generate_nonunique_unsorted;
     use crate::DocId;
-    use common::BitSet;
 
     fn create_docbitset(docs: &[DocId], max_doc: DocId) -> BitSetDocSet {
         let mut docset = BitSet::with_max_value(max_doc);
@@ -235,12 +235,9 @@ mod tests {
 #[cfg(all(test, feature = "unstable"))]
 mod bench {
 
-    use super::BitSet;
-    use super::BitSetDocSet;
+    use super::{BitSet, BitSetDocSet};
     use crate::docset::TERMINATED;
-    use crate::test;
-    use crate::tests;
-    use crate::DocSet;
+    use crate::{test, tests, DocSet};
 
     #[bench]
     fn bench_bitset_1pct_insert(b: &mut test::Bencher) {

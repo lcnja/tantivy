@@ -1,12 +1,12 @@
 // # Defining a tokenizer pipeline
 //
-// In this example, we'll see how to define a tokenizer pipeline
-// by aligning a bunch of `TokenFilter`.
+// In this example, we'll see how to define a tokenizer
+// by creating a custom `NgramTokenizer`.
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::tokenizer::NgramTokenizer;
-use tantivy::{doc, Index};
+use tantivy::{doc, Index, IndexWriter};
 
 fn main() -> tantivy::Result<()> {
     // # Defining the schema
@@ -36,8 +36,7 @@ fn main() -> tantivy::Result<()> {
     // need to be able to be able to retrieve it
     // for our application.
     //
-    // We can make our index lighter and
-    // by omitting `STORED` flag.
+    // We can make our index lighter by omitting the `STORED` flag.
     let body = schema_builder.add_text_field("body", TEXT);
 
     let schema = schema_builder.build();
@@ -50,11 +49,11 @@ fn main() -> tantivy::Result<()> {
     // for your unit tests... Or this example.
     let index = Index::create_in_ram(schema.clone());
 
-    // here we are registering our custome tokenizer
+    // here we are registering our custom tokenizer
     // this will store tokens of 3 characters each
     index
         .tokenizers()
-        .register("ngram3", NgramTokenizer::new(3, 3, false));
+        .register("ngram3", NgramTokenizer::new(3, 3, false).unwrap());
 
     // To insert document we need an index writer.
     // There must be only one writer at a time.
@@ -62,8 +61,8 @@ fn main() -> tantivy::Result<()> {
     // multithreaded.
     //
     // Here we use a buffer of 50MB per thread. Using a bigger
-    // heap for the indexer can increase its throughput.
-    let mut index_writer = index.writer(50_000_000)?;
+    // memory arena for the indexer can increase its throughput.
+    let mut index_writer: IndexWriter = index.writer(50_000_000)?;
     index_writer.add_document(doc!(
     title => "The Old Man and the Sea",
     body => "He was an old man who fished alone in a skiff in the Gulf Stream and \
@@ -104,8 +103,8 @@ fn main() -> tantivy::Result<()> {
     let top_docs = searcher.search(&query, &TopDocs::with_limit(10))?;
 
     for (_, doc_address) in top_docs {
-        let retrieved_doc = searcher.doc(doc_address)?;
-        println!("{}", schema.to_json(&retrieved_doc));
+        let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+        println!("{}", retrieved_doc.to_json(&schema));
     }
 
     Ok(())

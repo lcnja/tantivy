@@ -1,8 +1,8 @@
-use super::operation::DeleteOperation;
-use crate::Opstamp;
-
 use std::ops::DerefMut;
 use std::sync::{Arc, RwLock, Weak};
+
+use super::operation::DeleteOperation;
+use crate::Opstamp;
 
 // The DeleteQueue is similar in conceptually to a multiple
 // consumer single producer broadcast channel.
@@ -13,12 +13,10 @@ use std::sync::{Arc, RwLock, Weak};
 // which points to a specific place of the `DeleteQueue`.
 //
 // New consumer can be created in two ways
-// - calling `delete_queue.cursor()` returns a cursor, that
-//   will include all future delete operation (and some or none
-//   of the past operations... The client is in charge of checking the opstamps.).
-// - cloning an existing cursor returns a new cursor, that
-//   is at the exact same position, and can now advance independently
-//   from the original cursor.
+// - calling `delete_queue.cursor()` returns a cursor, that will include all future delete operation
+//   (and some or none of the past operations... The client is in charge of checking the opstamps.).
+// - cloning an existing cursor returns a new cursor, that is at the exact same position, and can
+//   now advance independently from the original cursor.
 #[derive(Default)]
 struct InnerDeleteQueue {
     writer: Vec<DeleteOperation>,
@@ -179,10 +177,9 @@ pub struct DeleteCursor {
 
 impl DeleteCursor {
     /// Skips operations and position it so that
-    /// - either all of the delete operation currently in the
-    ///   queue are consume and the next get will return None.
-    /// - the next get will return the first operation with an
-    /// `opstamp >= target_opstamp`.
+    /// - either all of the delete operation currently in the queue are consume and the next get
+    ///   will return `None`.
+    /// - the next get will return the first operation with an `opstamp >= target_opstamp`.
     pub fn skip_to(&mut self, target_opstamp: Opstamp) {
         // TODO Can be optimize as we work with block.
         while self.is_behind_opstamp(target_opstamp) {
@@ -190,7 +187,6 @@ impl DeleteCursor {
         }
     }
 
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::wrong_self_convention))]
     fn is_behind_opstamp(&mut self, target_opstamp: Opstamp) -> bool {
         self.get()
             .map(|operation| operation.opstamp < target_opstamp)
@@ -223,7 +219,7 @@ impl DeleteCursor {
     }
 
     /// Advance to the next delete operation.
-    /// Returns true iff there is such an operation.
+    /// Returns true if and only if there is such an operation.
     pub fn advance(&mut self) -> bool {
         if self.load_block_if_required() {
             self.pos += 1;
@@ -248,18 +244,28 @@ impl DeleteCursor {
 mod tests {
 
     use super::{DeleteOperation, DeleteQueue};
-    use crate::schema::{Field, Term};
+    use crate::index::SegmentReader;
+    use crate::query::{Explanation, Scorer, Weight};
+    use crate::{DocId, Score};
+
+    struct DummyWeight;
+    impl Weight for DummyWeight {
+        fn scorer(&self, _reader: &SegmentReader, _boost: Score) -> crate::Result<Box<dyn Scorer>> {
+            Err(crate::TantivyError::InternalError("dummy impl".to_owned()))
+        }
+
+        fn explain(&self, _reader: &SegmentReader, _doc: DocId) -> crate::Result<Explanation> {
+            Err(crate::TantivyError::InternalError("dummy impl".to_owned()))
+        }
+    }
 
     #[test]
     fn test_deletequeue() {
         let delete_queue = DeleteQueue::new();
 
-        let make_op = |i: usize| {
-            let field = Field::from_field_id(1u32);
-            DeleteOperation {
-                opstamp: i as u64,
-                term: Term::from_field_u64(field, i as u64),
-            }
+        let make_op = |i: usize| DeleteOperation {
+            opstamp: i as u64,
+            target: Box::new(DummyWeight),
         };
 
         delete_queue.push(make_op(1));
